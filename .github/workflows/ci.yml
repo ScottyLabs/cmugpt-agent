@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-editorconfig:
+    name: Check EditorConfig Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install EditorConfig Checker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: editorconfig-checker
+          fallback: none
+
+      - name: Check EditorConfig Compliance
+        run: editorconfig-checker --exclude LICENSE
+
+  check-uv:
+    name: Run uv Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install the project
+        run: uv sync --locked --all-extras --dev
+
+      - name: Check Formatting
+        run: uv run ruff format --check
+
+      - name: Typecheck
+        run: uv run ty check
+
+      - name: Lint
+        run: uv run ruff check

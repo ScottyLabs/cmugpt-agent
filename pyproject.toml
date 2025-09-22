@@ -1,0 +1,41 @@
+[project]
+name = "python-template"
+version = "0.1.0"
+description = "Python template for ScottyLabs"
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pre-commit>=4.2.0", "ruff>=0.11.10", "ty>=0.0.1a2"]
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.rules]
+unused-ignore-comment = "warn"
+
+[tool.ruff]
+fix = true
+unsafe-fixes = true
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# https://docs.astral.sh/ruff/linter/#rule-selection
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]

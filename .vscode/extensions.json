@@ -1,0 +1,8 @@
+{
+    "recommendations": [
+        "charliermarsh.ruff",
+        "editorconfig.editorconfig",
+        "astral-sh.ty",
+        "ms-python.python"
+    ]
+}

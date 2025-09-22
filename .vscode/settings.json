@@ -1,0 +1,20 @@
+{
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff"
+    },
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": "explicit",
+        "source.fixAll": "explicit"
+    },
+    "files.insertFinalNewline": true,
+    "files.watcherExclude": {
+        "uv.lock": true,
+    },
+    "search.exclude": {
+        "uv.lock": true,
+    },
+    "files.readonlyInclude": {
+        "uv.lock": true,
+    },
+}
