@@ -11,3 +11,6 @@ wheels/
 
 # Ruff
 .ruff_cache
+
+# Environment Keys
+.env
