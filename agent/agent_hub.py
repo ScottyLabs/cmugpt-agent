@@ -1,10 +1,10 @@
-import os
-from typing import List, Dict, Any
-from dedalus_labs import AsyncDedalus, DedalusRunner
-from schema import AgentResponse, UserInput
-import asyncio
 import json
+import os
+
+from dedalus_labs import AsyncDedalus, DedalusRunner
 from dotenv import load_dotenv
+
+from .schema import AgentResponse, UserInput
 
 load_dotenv()
 
@@ -14,9 +14,9 @@ client = AsyncDedalus(api_key=os.getenv("DEDALUS_API_KEY", ""))
 
 async def run_agent(
     user_input: UserInput,
-    mcp_servers: List[str] = ["cmugpt-mcp-server"],
+    mcp_servers: list[str] | None = None,
     model: str = "openai/gpt-4o",
-    message_history: List[Dict[str, str]] = None,
+    message_history: list[dict[str, str]] | None = None,
 ) -> AgentResponse:
     """
     Runs the Dedalus Agent with structured input/output.
@@ -30,6 +30,8 @@ async def run_agent(
     Returns:
         AgentResponse: Structured response with thought, action, and response_text.
     """
+    if mcp_servers is None:
+        mcp_servers = ["cmugpt-mcp-server"]
     runner = DedalusRunner(client)
 
     # Build messages list with history

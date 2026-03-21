@@ -1,9 +1,9 @@
-from typing import Dict, List, Optional, Union
-from enum import Enum
-from pydantic import BaseModel, Field, ConfigDict
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class ActionType(str, Enum):
+class ActionType(StrEnum):
     """Types of actions the agent can take"""
 
     QUERY = "query"
@@ -19,9 +19,9 @@ class ToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tool_name: str = Field(..., description="Name of the MCP tool called")
-    parameters: Optional[BaseModel] = Field(default=None, description="Tool parameters")
-    result: Union[str, int, float, bool, List[Union[str, int, float, bool]], None] = (
-        Field(default=None, description="Result from the tool call")
+    parameters: BaseModel | None = Field(default=None, description="Tool parameters")
+    result: str | int | float | bool | list[str | int | float | bool] | None = Field(
+        default=None, description="Result from the tool call"
     )
 
 
@@ -51,7 +51,7 @@ class AgentResponse(BaseModel):
 
     thought: Thought = Field(..., description="Agent's reasoning and confidence")
     action: ActionType = Field(..., description="Type of action taken")
-    tool_calls: List[ToolCall] = Field(
+    tool_calls: list[ToolCall] = Field(
         default_factory=list, description="MCP tools called"
     )
     response_text: str = Field(..., description="Final response to user")
@@ -66,7 +66,5 @@ class UserInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., description="User's question or request")
-    context: Optional[Dict[str, str]] = Field(
-        default=None, description="Optional context"
-    )
-    user_id: Optional[str] = Field(default=None, description="Identifier for the user")
+    context: dict[str, str] | None = Field(default=None, description="Optional context")
+    user_id: str | None = Field(default=None, description="Identifier for the user")
