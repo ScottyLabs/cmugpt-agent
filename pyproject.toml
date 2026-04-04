@@ -1,15 +1,16 @@
 [project]
-name = "python-template"
+name = "cmugpt-agent"
 version = "0.1.0"
-description = "Python template for ScottyLabs"
+description = "CMUGPT Agent for CMU campus information"
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
+    "mcp>=1.0.0",
     "openai>=1.108.0",
-    "python-dotenv>=1.1.1",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.1.1",
 ]
 
 [dependency-groups]
