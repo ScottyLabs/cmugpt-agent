@@ -6,8 +6,9 @@ license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dedalus-labs>=0.3.0",
-    "dotenv>=0.9.9",
+    "httpx>=0.28.1",
+    "openai>=1.108.0",
+    "python-dotenv>=1.1.1",
     "pydantic>=2.12.5",
 ]
 
