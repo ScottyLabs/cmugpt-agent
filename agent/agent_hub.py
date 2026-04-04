@@ -1,5 +1,8 @@
 import json
 import os
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any
 
 from dotenv import load_dotenv
 from mcp.client.session import ClientSession
@@ -24,6 +27,66 @@ client = AsyncOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY", ""),
     base_url=OPENROUTER_BASE_URL,
 )
+
+
+def _parse_agent_response(raw: str) -> AgentResponse:
+    """Parse model output into AgentResponse, with a safe fallback."""
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1]
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+    with suppress(json.JSONDecodeError, TypeError, ValueError):
+        parsed = json.loads(cleaned)
+        return AgentResponse(**parsed)
+    return _fallback_response(raw)
+
+
+async def _run_completion_loop(
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    openai_tools: list[dict] | None = None,
+    call_tool: Callable[[str, dict], Any] | None = None,
+) -> AgentResponse:
+    """Run the LLM loop and optionally support tool-calling."""
+    for _ in range(10):
+        chat_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if openai_tools:
+            chat_kwargs["tools"] = openai_tools
+
+        response = await client.chat.completions.create(**chat_kwargs)
+        choice = response.choices[0]
+
+        if (
+            openai_tools
+            and call_tool is not None
+            and choice.finish_reason == "tool_calls"
+            and choice.message.tool_calls
+        ):
+            messages.append(choice.message.model_dump())
+
+            for tool_call in choice.message.tool_calls:
+                fn = tool_call.function
+                args = json.loads(fn.arguments) if fn.arguments else {}
+                result = await call_tool(fn.name, args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    }
+                )
+            continue
+
+        return _parse_agent_response(choice.message.content or "")
+
+    return _fallback_response(
+        "Unable to complete the request within allowed steps.",
+        confidence=0.3,
+    )
 
 
 async def _get_mcp_tools(
@@ -122,61 +185,34 @@ async def run_agent(
         messages.extend(message_history)
     messages.append({"role": "user", "content": user_input.query})
 
-    async with (
-        streamable_http_client(MCP_SERVER_URL) as (
-            read_stream,
-            write_stream,
-            _,
-        ),
-        ClientSession(read_stream, write_stream) as session,
-    ):
-        await session.initialize()
-        openai_tools = await _get_mcp_tools(session)
+    if not os.getenv("OPENROUTER_API_KEY"):
+        return _fallback_response(
+            "OPENROUTER_API_KEY is not configured.",
+            confidence=0.2,
+        )
 
-        # Tool-calling loop (max 10 iterations)
-        for _ in range(10):
-            chat_kwargs: dict = {
-                "model": model,
-                "messages": messages,
-            }
-            if openai_tools:
-                chat_kwargs["tools"] = openai_tools
+    if MCP_SERVER_URL:
+        try:
+            async with (
+                streamable_http_client(MCP_SERVER_URL) as (
+                    read_stream,
+                    write_stream,
+                    _,
+                ),
+                ClientSession(read_stream, write_stream) as session,
+            ):
+                await session.initialize()
+                openai_tools = await _get_mcp_tools(session)
+                return await _run_completion_loop(
+                    messages,
+                    model=model,
+                    openai_tools=openai_tools,
+                    call_tool=lambda name, arguments: _call_mcp_tool(
+                        session, name, arguments
+                    ),
+                )
+        except Exception:
+            # If MCP is unavailable, continue without tool-calling.
+            pass
 
-            response = await client.chat.completions.create(
-                **chat_kwargs,
-            )
-            choice = response.choices[0]
-
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                messages.append(choice.message.model_dump())
-
-                for tool_call in choice.message.tool_calls:
-                    fn = tool_call.function
-                    args = json.loads(fn.arguments) if fn.arguments else {}
-                    result = await _call_mcp_tool(session, fn.name, args)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": result,
-                        }
-                    )
-                continue
-
-            # No tool calls — parse the final response
-            raw = choice.message.content or ""
-            # Strip markdown code fences if present
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1]
-                cleaned = cleaned.rsplit("```", 1)[0].strip()
-            try:
-                parsed = json.loads(cleaned)
-                return AgentResponse(**parsed)
-            except (json.JSONDecodeError, Exception):
-                return _fallback_response(raw)
-
-    return _fallback_response(
-        "Unable to complete the request within allowed steps.",
-        confidence=0.3,
-    )
+    return await _run_completion_loop(messages, model=model)
