@@ -53,8 +53,8 @@
 
               postPatch = ''
                 substituteInPlace src/main.py --replace-fail 'from pathlib import Path' $'import os\nfrom pathlib import Path'
-                substituteInPlace src/main.py --replace-fail 'app.run(host="0.0.0.0", port=8000, debug=True)' \
-                  'app.run(host=os.environ.get("CMUGPT_HOST", "127.0.0.1"), port=int(os.environ.get("CMUGPT_PORT", "8000")), debug=os.environ.get("CMUGPT_DEBUG", "").lower() in ("1", "true"))'
+                substituteInPlace src/main.py --replace-fail 'app.run(host="0.0.0.0", port=5000, debug=True)' \
+                  'app.run(host=os.environ.get("CMUGPT_HOST", "127.0.0.1"), port=int(os.environ.get("CMUGPT_PORT", "5000")), debug=os.environ.get("CMUGPT_DEBUG", "").lower() in ("1", "true"))'
               '';
 
               postInstall = ''
