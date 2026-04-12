@@ -129,7 +129,9 @@ def agent_respond():
             message_history=message_history,
         )
     except Exception as exc:
-        return jsonify({"error": f"Agent execution failed: {exc}"}), HTTPStatus.INTERNAL_SERVER_ERROR
+        return jsonify(
+            {"error": f"Agent execution failed: {exc}"}
+        ), HTTPStatus.INTERNAL_SERVER_ERROR
 
     return jsonify(agent_response.model_dump()), HTTPStatus.OK
 
