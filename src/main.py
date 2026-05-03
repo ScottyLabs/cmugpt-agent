@@ -76,21 +76,27 @@ async def agent_respond(request: Request):
         ) from exc
 
     if not isinstance(payload, Mapping):
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
-                            detail="Request body must be a JSON object.")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Request body must be a JSON object.",
+        )
 
     try:
         normalized_input = _normalize_payload(payload)
         user_input = UserInput(**normalized_input)
     except (ValueError, ValidationError) as exc:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
-                            detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
     model = payload.get("model")
     message_history = payload.get("message_history")
     if message_history is not None and not isinstance(message_history, list):
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
-                            detail="'message_history' must be a list if provided.")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'message_history' must be a list if provided.",
+        )
     if isinstance(message_history, list):
         valid_history = all(
             isinstance(item, Mapping)
