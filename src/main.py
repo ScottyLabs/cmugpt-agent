@@ -129,7 +129,7 @@ async def agent_respond(request: Request):
 
 
 def main() -> None:
-    port = int(os.environ.get("PORT", "5001"))
+    port = int(os.environ.get("PORT", "5000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
