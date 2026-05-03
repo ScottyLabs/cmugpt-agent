@@ -4,9 +4,9 @@ from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
-import uvicorn
 
-from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -69,22 +69,28 @@ async def health() -> JSONResponse:
 async def agent_respond(request: Request):
     try:
         payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Request body must be valid JSON object.")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Request body must be valid JSON object.",
+        ) from exc
 
     if not isinstance(payload, Mapping):
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Request body must be a JSON object.")
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
+                            detail="Request body must be a JSON object.")
 
     try:
         normalized_input = _normalize_payload(payload)
         user_input = UserInput(**normalized_input)
     except (ValueError, ValidationError) as exc:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
+                            detail=str(exc)) from exc
 
     model = payload.get("model")
     message_history = payload.get("message_history")
     if message_history is not None and not isinstance(message_history, list):
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="'message_history' must be a list if provided.")
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, 
+                            detail="'message_history' must be a list if provided.")
     if isinstance(message_history, list):
         valid_history = all(
             isinstance(item, Mapping)
@@ -96,7 +102,8 @@ async def agent_respond(request: Request):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail=(
-                    "'message_history' items must be objects with string 'role' and 'content' fields."
+                    "'message_history' items must be objects with string 'role' "
+                    "and 'content' fields."
                 ),
             )
 
@@ -107,7 +114,10 @@ async def agent_respond(request: Request):
             message_history=message_history,
         )
     except Exception as exc:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=f"Agent execution failed: {exc}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Agent execution failed: {exc}",
+        ) from exc
 
     return JSONResponse(content=agent_response.model_dump(), status_code=HTTPStatus.OK)
 
