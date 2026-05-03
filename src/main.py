@@ -1,22 +1,22 @@
-import asyncio
 import os
 import sys
 from collections.abc import Mapping
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+import uvicorn
 
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-# Running as "python src/main.py" sets sys.path to src/, so add project root.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import UserInput, run_agent
 
-app = Flask(__name__)
+app = FastAPI()
 
 
 def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -46,63 +46,45 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _run_agent_sync(
+async def _run_agent_async(
     user_input: UserInput,
     *,
     model: str | None,
     message_history: list[dict[str, str]] | None,
 ) -> Any:
-    """Run async agent logic from a sync Flask route."""
-    try:
-        return asyncio.run(
-            run_agent(
-                user_input=user_input,
-                model=model or "openai/gpt-4o",
-                message_history=message_history,
-            )
-        )
-    except RuntimeError:
-        # Handles environments where an event loop is already running.
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(
-                run_agent(
-                    user_input=user_input,
-                    model=model or "openai/gpt-4o",
-                    message_history=message_history,
-                )
-            )
-        finally:
-            loop.close()
+    """Run the async agent logic from an async FastAPI route."""
+    return await run_agent(
+        user_input=user_input,
+        model=model or "openai/gpt-4o",
+        message_history=message_history,
+    )
 
 
 @app.get("/health")
-def health() -> tuple[dict[str, str], int]:
-    return {"status": "ok"}, HTTPStatus.OK
+async def health() -> JSONResponse:
+    return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
 
 
 @app.post("/agent/respond")
-def agent_respond():
-    payload = request.get_json(silent=True)
+async def agent_respond(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Request body must be valid JSON object.")
+
     if not isinstance(payload, Mapping):
-        return (
-            jsonify({"error": "Request body must be valid JSON object."}),
-            HTTPStatus.BAD_REQUEST,
-        )
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Request body must be a JSON object.")
 
     try:
         normalized_input = _normalize_payload(payload)
         user_input = UserInput(**normalized_input)
     except (ValueError, ValidationError) as exc:
-        return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc))
 
     model = payload.get("model")
     message_history = payload.get("message_history")
     if message_history is not None and not isinstance(message_history, list):
-        return (
-            jsonify({"error": "'message_history' must be a list if provided."}),
-            HTTPStatus.BAD_REQUEST,
-        )
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="'message_history' must be a list if provided.")
     if isinstance(message_history, list):
         valid_history = all(
             isinstance(item, Mapping)
@@ -111,34 +93,28 @@ def agent_respond():
             for item in message_history
         )
         if not valid_history:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "'message_history' items must be objects with "
-                            "string 'role' and 'content' fields."
-                        )
-                    }
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    "'message_history' items must be objects with string 'role' and 'content' fields."
                 ),
-                HTTPStatus.BAD_REQUEST,
             )
 
     try:
-        agent_response = _run_agent_sync(
+        agent_response = await _run_agent_async(
             user_input,
             model=model if isinstance(model, str) else None,
             message_history=message_history,
         )
     except Exception as exc:
-        return jsonify(
-            {"error": f"Agent execution failed: {exc}"}
-        ), HTTPStatus.INTERNAL_SERVER_ERROR
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=f"Agent execution failed: {exc}")
 
-    return jsonify(agent_response.model_dump()), HTTPStatus.OK
+    return JSONResponse(content=agent_response.model_dump(), status_code=HTTPStatus.OK)
 
 
 def main() -> None:
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
+    port = int(os.environ.get("PORT", "5001"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

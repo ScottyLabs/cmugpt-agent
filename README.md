@@ -24,6 +24,18 @@ uv run pre-commit install --install-hooks
 -   Format: `uv run ruff format`
 -   Typecheck: `uv run ty check`
 -   Lint: `uv run ruff check`
+ 
+To run the FastAPI app locally with `uv` (the project uses `uv` for task execution), run:
+
+```sh
+uv run python src/main.py
+```
+
+You can set the `PORT` environment variable to change the listening port (defaults to `5000`):
+
+```sh
+PORT=8080 uv run python src/main.py
+```
 
 ## Guidelines
 
