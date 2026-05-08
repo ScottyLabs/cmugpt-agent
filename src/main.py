@@ -180,6 +180,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events endpoint.
 
     Emits:
+      event: status data: {"text": "<short progress label>"}
       event: delta  data: {"text": "<chunk of response_text>"}
       event: done   data: <full AgentResponse JSON>
       event: error  data: {"error": "...", "detail": "..."}

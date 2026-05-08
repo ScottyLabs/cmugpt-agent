@@ -1,14 +1,22 @@
 """SSE streaming for the CMUGPT agent.
 
-The agent's structured output is a single JSON object whose `response_text`
-field contains the user-facing Markdown. We stream by:
+The agent's structured output is normally a single JSON object whose
+`response_text` field contains the user-facing Markdown. Some models still
+produce plain Markdown after a tool pass; we stream that directly instead of
+waiting for a JSON key that will never arrive.
+
+We stream by:
 
 1. Running the (tool-using) LLM loop with `stream=True`.
-2. Buffering raw content until we see the `"response_text":"` marker.
-3. From there, emitting JSON-unescaped characters as `delta` events as soon
-   as each escape sequence resolves.
-4. Once the closing string-quote is reached, we keep buffering the rest.
-5. After the stream ends, we parse the complete buffer and emit a `done`
+2. Emitting `status` events while tools are being called.
+3. If the final answer begins as JSON, buffering raw content until we see the
+   `"response_text"` marker.
+4. From there, emitting JSON-unescaped characters as `delta` events as soon
+   as each escape sequence resolves. If the final answer begins as Markdown,
+   emitting it directly as `delta` events.
+5. Once the closing string-quote is reached for JSON, we keep buffering the
+   rest.
+6. After the stream ends, we parse the complete buffer and emit a `done`
    event with the full AgentResponse.
 
 If parsing fails at any point we fall back to a single delta+done with the
@@ -27,11 +35,14 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from .agent_hub import (
+    _apply_tool_transparency_guard,
     _build_system_prompt,
     _call_mcp_tool,
     _fallback_response,
     _get_mcp_tools,
     _parse_agent_response,
+    _should_require_tool,
+    _tool_metadata_message,
     client,
 )
 from .schema import UserInput
@@ -68,17 +79,21 @@ def _build_messages(
 
 
 class _ResponseTextStreamer:
-    """Incremental JSON parser specialized for our schema.
+    """Incremental parser for streamed user-facing text.
 
     Feeds raw content chunks in, yields decoded characters of `response_text`
-    as soon as each escape sequence is complete. The full raw buffer is also
-    retained so the caller can json.loads(...) it after the stream ends.
+    as soon as each escape sequence is complete. If the model ignores the
+    schema and starts with Markdown instead of JSON, yields the raw Markdown
+    directly. The full raw buffer is also retained so the caller can parse or
+    wrap it after the stream ends.
     """
 
     _MARKER = '"response_text"'
 
     def __init__(self) -> None:
         self.buffer = ""
+        self._mode = "unknown"  # unknown -> json | raw
+        self._raw_emit_pos = 0
         self._scan_pos = 0
         self._state = "search"  # search -> in_string -> done
         self._escape_pending = False
@@ -91,6 +106,22 @@ class _ResponseTextStreamer:
             return ""
         self.buffer += chunk
         out_parts: list[str] = []
+
+        if self._mode == "unknown":
+            first_content_idx = 0
+            while (
+                first_content_idx < len(self.buffer)
+                and self.buffer[first_content_idx].isspace()
+            ):
+                first_content_idx += 1
+            if first_content_idx >= len(self.buffer):
+                return ""
+            self._mode = "json" if self.buffer[first_content_idx] == "{" else "raw"
+
+        if self._mode == "raw":
+            out = self.buffer[self._raw_emit_pos :]
+            self._raw_emit_pos = len(self.buffer)
+            return out
 
         if self._state == "search":
             idx = self.buffer.find(self._MARKER, self._scan_pos)
@@ -159,6 +190,21 @@ class _ResponseTextStreamer:
         return "".join(out_parts)
 
 
+def _final_streaming_instruction(services_used: list[str]) -> dict[str, str]:
+    names = ", ".join(f"`{name}`" for name in services_used) or "none"
+    return {
+        "role": "system",
+        "content": (
+            "Final streaming instruction: the next assistant message is the "
+            "final answer. Output only the strict JSON object. Put "
+            "`response_text` first and begin with `{\"response_text\":`. Do "
+            "not put `thought`, `action`, `tool_calls`, or `services_used` "
+            "before `response_text`; those fields come after it. "
+            f"Authoritative services_used for this turn: {names}."
+        ),
+    }
+
+
 async def _run_streaming_loop(
     *,
     messages: list[dict[str, Any]],
@@ -168,8 +214,8 @@ async def _run_streaming_loop(
 ) -> AsyncIterator[StreamEvent]:
     """Run the LLM loop with streaming, yielding SSE events.
 
-    Tool-call iterations are silent (no deltas). The final synthesis pass
-    parses the response_text incrementally and emits delta events.
+    Tool-call iterations emit status only. The final synthesis pass parses
+    response_text incrementally or streams plain Markdown directly.
     """
     services_used: list[str] = []
     final_content = ""
@@ -182,6 +228,8 @@ async def _run_streaming_loop(
         }
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
+        if openai_tools and not services_used and _should_require_tool(messages):
+            chat_kwargs["tool_choice"] = "required"
 
         stream = await client.chat.completions.create(**chat_kwargs)
 
@@ -229,6 +277,7 @@ async def _run_streaming_loop(
 
         # If the model emitted tool_calls, execute them and loop.
         if tool_call_buf and call_tool is not None:
+            yield ("status", {"text": "Checking CMU tools..."})
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": accumulated_content or None,
@@ -271,6 +320,9 @@ async def _run_streaming_loop(
                         "content": wrapped,
                     }
                 )
+            messages.append(_tool_metadata_message(services_used))
+            messages.append(_final_streaming_instruction(services_used))
+            yield ("status", {"text": "Writing answer..."})
             continue
 
         # Final answer (no tool calls this iteration).
@@ -291,8 +343,7 @@ async def _run_streaming_loop(
 
     # Parse the final JSON for metadata + emit done.
     parsed = _parse_agent_response(final_content)
-    if services_used:
-        parsed.services_used = services_used
+    parsed = _apply_tool_transparency_guard(parsed, messages, services_used)
     yield ("done", parsed.model_dump())
 
 

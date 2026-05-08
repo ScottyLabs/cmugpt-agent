@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -27,6 +28,110 @@ client = AsyncOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY", ""),
     base_url=OPENROUTER_BASE_URL,
 )
+
+TOOL_TRANSPARENCY_RE = re.compile(
+    r"\b(mcp|mcps|tool|tools|external service|external services|look(?:ed)? up)\b",
+    re.IGNORECASE,
+)
+
+CMU_DATA_RE = re.compile(
+    r"\b("
+    r"cmu|carnegie mellon|campus|dining|food|eat|eateries|restaurant|"
+    r"cafe|cafes|coffee|menu|open|hours|building|where|location|"
+    r"course|class|professor|faculty|event|events|transit|shuttle|"
+    r"parking|library|libraries"
+    r")\b",
+    re.IGNORECASE,
+)
+
+NEGATIVE_TOOL_CLAIM_PATTERNS = [
+    re.compile(
+        r"\bI\s+(?:have\s+not|haven't|did\s+not|didn't)\s+"
+        r"(?:use|used)\s+any\s+(?:MCPs?\s+or\s+)?tools?\s*"
+        r"(?:yet|so\s+far)?[^.!\n]*(?:[.!]\s*)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:no|none)\s+(?:MCPs?\s+or\s+)?tools?\s+"
+        r"(?:were\s+)?used[^.!\n]*(?:[.!]\s*)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:the\s+)?information\s+(?:I\s+provided\s+)?"
+        r"(?:is|was)\s+based\s+on\s+general\s+knowledge[^.!\n]*(?:[.!]\s*)?",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return ""
+
+
+def _asks_about_tools(text: str) -> bool:
+    return bool(TOOL_TRANSPARENCY_RE.search(text))
+
+
+def _should_require_tool(messages: list[dict[str, Any]]) -> bool:
+    """Require a tool for CMU data lookups when tools are available."""
+    query = _latest_user_text(messages)
+    if not query:
+        return False
+    return bool(CMU_DATA_RE.search(query))
+
+
+def _tool_metadata_message(services_used: list[str]) -> dict[str, str]:
+    names = ", ".join(f"`{name}`" for name in services_used)
+    return {
+        "role": "system",
+        "content": (
+            "Tool-use metadata for this turn: MCP/tools used: "
+            f"{names}. If the user asks about tool or MCP usage, say that "
+            "tools were used and name these user-safe tools. Do not claim "
+            "that no tools were used."
+        ),
+    }
+
+
+def _strip_negative_tool_claims(text: str) -> str:
+    cleaned = text
+    for pattern in NEGATIVE_TOOL_CLAIM_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _apply_tool_transparency_guard(
+    parsed: AgentResponse,
+    messages: list[dict[str, Any]],
+    services_used: list[str],
+) -> AgentResponse:
+    """Keep user-facing tool disclosure consistent with authoritative metadata."""
+    if not services_used:
+        return parsed
+
+    parsed.services_used = services_used
+    query = _latest_user_text(messages)
+    if not _asks_about_tools(query):
+        return parsed
+
+    names = ", ".join(f"`{name}`" for name in services_used)
+    disclosure = f"I did use MCP-connected tools for this turn: {names}."
+    text = parsed.response_text or ""
+    stripped = _strip_negative_tool_claims(text)
+    lower = stripped.lower()
+    names_mentioned = any(name.lower() in lower for name in services_used)
+    tool_mentioned = "tool" in lower or "mcp" in lower
+
+    if not stripped:
+        parsed.response_text = disclosure
+    elif not tool_mentioned or not names_mentioned or stripped != text.strip():
+        parsed.response_text = f"{disclosure}\n\n{stripped}"
+    else:
+        parsed.response_text = stripped
+    return parsed
 
 
 def _parse_agent_response(raw: str) -> AgentResponse:
@@ -57,6 +162,13 @@ async def _run_completion_loop(
         }
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
+        if (
+            openai_tools
+            and call_tool is not None
+            and not services_used
+            and _should_require_tool(messages)
+        ):
+            chat_kwargs["tool_choice"] = "required"
 
         response = await client.chat.completions.create(**chat_kwargs)
         choice = response.choices[0]
@@ -86,13 +198,12 @@ async def _run_completion_loop(
                         "content": wrapped,
                     }
                 )
+            messages.append(_tool_metadata_message(services_used))
             continue
 
         parsed = _parse_agent_response(choice.message.content or "")
         # Authoritative list comes from the loop, not the model's self-report.
-        if services_used:
-            parsed.services_used = services_used
-        return parsed
+        return _apply_tool_transparency_guard(parsed, messages, services_used)
 
     return _fallback_response(
         "Unable to complete the request within allowed steps.",
@@ -302,10 +413,18 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "- `##` headings for multi-section answers\n"
         "- `-` bullet lists for enumerations\n"
         "- `**bold**` for building names, hours, key facts\n"
+        "- tables for repeated structured records with the same fields "
+        "(for example dining locations with cuisine, location, and "
+        "offerings)\n"
         "- `[label](url)` links only when you have a reliable URL from a "
         "tool result or a known canonical CMU domain (cmu.edu)\n"
-        "- fenced code blocks or tables for structured data (menus, "
-        "schedules)\n"
+        "- fenced code blocks with a language tag for code, for example "
+        "use `python` after the opening triple backticks. Never put "
+        "multi-line code in plain paragraphs.\n"
+        "For grouped recommendations, use `##` or `###` headings for "
+        "groups, not bare paragraph labels. Avoid deeply nested bullet "
+        "lists; prefer a table or compact bullets like "
+        "`- **Name** — location; key details`.\n"
         "Keep answers tight. No filler. Match the user's language.\n"
         "\n"
         "## Refusal recipe\n"
@@ -321,15 +440,17 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "and tool-failure cases — MUST be a single JSON object, no prose "
         "outside it, no code fences around it, matching:\n"
         "{\n"
+        '  "response_text": "<Markdown answer>",\n'
         '  "thought": {"reasoning": "<one short sentence>", '
         '"confidence": 0.0-1.0},\n'
         '  "action": "query|retrieve|search|compute|respond",\n'
         '  "tool_calls": [],\n'
         '  "services_used": ["<tool name>", ...],\n'
-        '  "response_text": "<Markdown answer>",\n'
         '  "metadata": {}\n'
         "}\n"
         "Rules for fields:\n"
+        "- `response_text`: put this first in the object so streaming "
+        "clients can display the answer as it is generated.\n"
         "- `services_used`: every tool you called this turn, by exact "
         "name. Empty list if you used none.\n"
         "- `action`: `respond` when no tools used; otherwise the verb "
