@@ -54,7 +54,14 @@ class AgentResponse(BaseModel):
     tool_calls: list[ToolCall] = Field(
         default_factory=list, description="MCP tools called"
     )
-    response_text: str = Field(..., description="Final response to user")
+    services_used: list[str] = Field(
+        default_factory=list,
+        description="Names of MCP services/tools invoked while answering",
+    )
+    response_text: str = Field(
+        ...,
+        description="Final response to user, formatted as GitHub-flavored Markdown",
+    )
     metadata: Metadata = Field(
         default_factory=Metadata, description="Additional context"
     )

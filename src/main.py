@@ -98,9 +98,11 @@ async def agent_respond(request: Request):
             detail="'message_history' must be a list if provided.",
         )
     if isinstance(message_history, list):
+        # Only user/assistant turns may come from the client. Block smuggled
+        # `system` or `tool` roles, which could be used to inject instructions.
         valid_history = all(
             isinstance(item, Mapping)
-            and isinstance(item.get("role"), str)
+            and item.get("role") in ("user", "assistant")
             and isinstance(item.get("content"), str)
             for item in message_history
         )
@@ -108,8 +110,9 @@ async def agent_respond(request: Request):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail=(
-                    "'message_history' items must be objects with string 'role' "
-                    "and 'content' fields."
+                    "'message_history' items must be objects with "
+                    "'role' in {'user','assistant'} and a string "
+                    "'content' field."
                 ),
             )
 
