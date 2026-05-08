@@ -10,14 +10,14 @@ We stream by:
 1. Running the (tool-using) LLM loop with `stream=True`.
 2. Emitting `status` events while tools are being called.
 3. If the final answer begins as JSON, buffering raw content until we see the
-   `"response_text"` marker.
+    `"response_text"` marker.
 4. From there, emitting JSON-unescaped characters as `delta` events as soon
-   as each escape sequence resolves. If the final answer begins as Markdown,
-   emitting it directly as `delta` events.
+    as each escape sequence resolves. If the final answer begins as Markdown,
+    emitting it directly as `delta` events.
 5. Once the closing string-quote is reached for JSON, we keep buffering the
-   rest.
+    rest.
 6. After the stream ends, we parse the complete buffer and emit a `done`
-   event with the full AgentResponse.
+    event with the full AgentResponse.
 
 If parsing fails at any point we fall back to a single delta+done with the
 non-streamed result, so streaming clients always get a usable answer.
@@ -60,8 +60,7 @@ def _sanitize_history(
     return [
         t
         for t in message_history
-        if t.get("role") in ("user", "assistant")
-        and isinstance(t.get("content"), str)
+        if t.get("role") in ("user", "assistant") and isinstance(t.get("content"), str)
     ]
 
 
@@ -197,7 +196,7 @@ def _final_streaming_instruction(services_used: list[str]) -> dict[str, str]:
         "content": (
             "Final streaming instruction: the next assistant message is the "
             "final answer. Output only the strict JSON object. Put "
-            "`response_text` first and begin with `{\"response_text\":`. Do "
+            '`response_text` first and begin with `{"response_text":`. Do '
             "not put `thought`, `action`, `tool_calls`, or `services_used` "
             "before `response_text`; those fields come after it. "
             f"Authoritative services_used for this turn: {names}."

@@ -2,10 +2,10 @@
 
 Runs against the live OpenRouter + MCP server configured in .env.
 Each test asserts:
-  * response_text is non-empty Markdown
-  * no "stall" phrases ("please hold on", "I will query", ...)
-  * services_used is populated when the query requires data
-  * schema fields are sane
+    * response_text is non-empty Markdown
+    * no "stall" phrases ("please hold on", "I will query", ...)
+    * services_used is populated when the query requires data
+    * schema fields are sane
 
 Run with: `uv run python agent/tests.py`
 """
