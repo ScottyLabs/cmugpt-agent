@@ -345,6 +345,19 @@ async def run_agent(
             confidence=0.2,
         )
 
+    # Strip any non-user/assistant turns from caller-supplied history. We own
+    # the system prompt; smuggled `system` or `tool` turns are an injection
+    # vector. Surface clients may innocently include `system` rows from their
+    # own DB schema — we filter them defensively here.
+    safe_history: list[dict[str, str]] = []
+    if message_history:
+        safe_history = [
+            t
+            for t in message_history
+            if t.get("role") in ("user", "assistant")
+            and isinstance(t.get("content"), str)
+        ]
+
     if MCP_SERVER_URL:
         try:
             async with (
@@ -363,8 +376,8 @@ async def run_agent(
                         "content": _build_system_prompt(openai_tools),
                     }
                 ]
-                if message_history:
-                    messages.extend(message_history)
+                if safe_history:
+                    messages.extend(safe_history)
                 messages.append({"role": "user", "content": user_input.query})
                 return await _run_completion_loop(
                     messages,
@@ -379,7 +392,7 @@ async def run_agent(
             pass
 
     messages = [{"role": "system", "content": _build_system_prompt(None)}]
-    if message_history:
-        messages.extend(message_history)
+    if safe_history:
+        messages.extend(safe_history)
     messages.append({"role": "user", "content": user_input.query})
     return await _run_completion_loop(messages, model=model)
