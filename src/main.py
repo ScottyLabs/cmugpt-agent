@@ -1,13 +1,15 @@
+import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +17,42 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import UserInput, run_agent
+from agent.streaming import stream_agent_response
 
 app = FastAPI()
+
+# Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
+# to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
+# auth is skipped (local dev). The HTTPBearer scheme has auto_error=False so
+# we can return our own structured error envelope.
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _require_shared_secret(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
+) -> None:
+    expected = os.getenv("AGENT_SHARED_SECRET")
+    if not expected:
+        return  # auth disabled
+    if (
+        creds is None
+        or creds.scheme.lower() != "bearer"
+        or creds.credentials != expected
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNAUTHORIZED,
+            detail="Invalid or missing bearer token.",
+        )
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    """Emit both `error` and `detail` so legacy + modern clients both work."""
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": detail, "detail": detail},
+    )
 
 
 def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -46,35 +82,10 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-async def _run_agent_async(
-    user_input: UserInput,
-    *,
-    model: str | None,
-    message_history: list[dict[str, str]] | None,
-) -> Any:
-    """Run the async agent logic from an async FastAPI route."""
-    return await run_agent(
-        user_input=user_input,
-        model=model or "openai/gpt-4o",
-        message_history=message_history,
-    )
-
-
-@app.get("/health")
-async def health() -> JSONResponse:
-    return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
-
-
-@app.post("/agent/respond")
-async def agent_respond(request: Request):
-    try:
-        payload = await request.json()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="Request body must be valid JSON object.",
-        ) from exc
-
+def _parse_request(
+    payload: Any,
+) -> tuple[UserInput, str | None, list[dict[str, str]] | None]:
+    """Validate the request body and return (user_input, model, history)."""
     if not isinstance(payload, Mapping):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -90,7 +101,9 @@ async def agent_respond(request: Request):
             detail=str(exc),
         ) from exc
 
-    model = payload.get("model")
+    raw_model = payload.get("model")
+    model = raw_model if isinstance(raw_model, str) else None
+
     message_history = payload.get("message_history")
     if message_history is not None and not isinstance(message_history, list):
         raise HTTPException(
@@ -98,9 +111,12 @@ async def agent_respond(request: Request):
             detail="'message_history' must be a list if provided.",
         )
     if isinstance(message_history, list):
+        # Accept user/assistant/system at the boundary; the agent strips
+        # `system` defensively. Surface clients keep `system` rows in their
+        # DB schema, so rejecting them here would break production.
         valid_history = all(
             isinstance(item, Mapping)
-            and isinstance(item.get("role"), str)
+            and item.get("role") in ("user", "assistant", "system")
             and isinstance(item.get("content"), str)
             for item in message_history
         )
@@ -108,15 +124,36 @@ async def agent_respond(request: Request):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail=(
-                    "'message_history' items must be objects with string 'role' "
-                    "and 'content' fields."
+                    "'message_history' items must be objects with "
+                    "'role' in {'user','assistant','system'} and a string "
+                    "'content' field."
                 ),
             )
 
+    return user_input, model, message_history
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
+
+
+@app.post("/agent/respond", dependencies=[Depends(_require_shared_secret)])
+async def agent_respond(request: Request) -> JSONResponse:
     try:
-        agent_response = await _run_agent_async(
-            user_input,
-            model=model if isinstance(model, str) else None,
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Request body must be valid JSON object.",
+        ) from exc
+
+    user_input, model, message_history = _parse_request(payload)
+
+    try:
+        agent_response = await run_agent(
+            user_input=user_input,
+            model=model or "openai/gpt-4o",
             message_history=message_history,
         )
     except Exception as exc:
@@ -125,7 +162,60 @@ async def agent_respond(request: Request):
             detail=f"Agent execution failed: {exc}",
         ) from exc
 
-    return JSONResponse(content=agent_response.model_dump(), status_code=HTTPStatus.OK)
+    return JSONResponse(
+        content=agent_response.model_dump(),
+        status_code=HTTPStatus.OK,
+    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.post(
+    "/agent/respond/stream",
+    dependencies=[Depends(_require_shared_secret)],
+)
+async def agent_respond_stream(request: Request) -> StreamingResponse:
+    """Server-Sent Events endpoint.
+
+    Emits:
+        event: status data: {"text": "<short progress label>"}
+        event: delta  data: {"text": "<chunk of response_text>"}
+        event: done   data: <full AgentResponse JSON>
+        event: error  data: {"error": "...", "detail": "..."}
+    """
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Request body must be valid JSON object.",
+        ) from exc
+
+    user_input, model, message_history = _parse_request(payload)
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        try:
+            async for event_name, data in stream_agent_response(
+                user_input=user_input,
+                model=model or "openai/gpt-4o",
+                message_history=message_history,
+            ):
+                yield _sse(event_name, data).encode("utf-8")
+        except Exception as exc:
+            err = f"Agent execution failed: {exc}"
+            yield _sse("error", {"error": err, "detail": err}).encode("utf-8")
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx/proxy buffering
+        },
+    )
 
 
 def main() -> None:
