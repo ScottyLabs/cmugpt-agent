@@ -14,3 +14,7 @@ wheels/
 
 # Environment Keys
 .env
+
+# Google OAuth tokens and credentials
+token.json
+credentials.json

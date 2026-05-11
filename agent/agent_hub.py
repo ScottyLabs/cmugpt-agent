@@ -266,7 +266,10 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
 
 
 # Should be updated after futher testing.
-def _build_system_prompt(openai_tools: list[dict] | None) -> str:
+def _build_system_prompt(
+    openai_tools: list[dict] | None,
+    system_prompt_addendum: str | None = None,
+) -> str:
     """Compose the system prompt, injecting any discovered MCP tools."""
     tool_catalog = "No external tools are available right now."
     if openai_tools:
@@ -279,7 +282,7 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
             lines.append(f"- `{name}`: {short}" if short else f"- `{name}`")
         tool_catalog = "Available tools (call them by exact name):\n" + "\n".join(lines)
 
-    return (
+    base = (
         "You are CMUGPT, a friendly and concise assistant for Carnegie "
         "Mellon University students, staff, and visitors. Think of yourself "
         "as a knowledgeable upperclassman: warm, direct, never "
@@ -462,12 +465,16 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "the schema stays.\n"
         "Output ONLY the JSON object."
     )
+    if system_prompt_addendum:
+        return base + "\n\n" + system_prompt_addendum
+    return base
 
 
 async def run_agent(
     user_input: UserInput,
     model: str = "openai/gpt-4o",
     message_history: list[dict[str, str]] | None = None,
+    system_prompt_addendum: str | None = None,
 ) -> AgentResponse:
     """
     Runs the agent using OpenRouter for LLM and Railway MCP for tools.
@@ -514,7 +521,9 @@ async def run_agent(
                 messages: list[dict] = [
                     {
                         "role": "system",
-                        "content": _build_system_prompt(openai_tools),
+                        "content": _build_system_prompt(
+                            openai_tools, system_prompt_addendum
+                        ),
                     }
                 ]
                 if safe_history:
@@ -532,7 +541,8 @@ async def run_agent(
             # If MCP is unavailable, continue without tool-calling.
             pass
 
-    messages = [{"role": "system", "content": _build_system_prompt(None)}]
+    prompt = _build_system_prompt(None, system_prompt_addendum)
+    messages = [{"role": "system", "content": prompt}]
     if safe_history:
         messages.extend(safe_history)
     messages.append({"role": "user", "content": user_input.query})

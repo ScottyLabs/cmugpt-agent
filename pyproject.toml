@@ -14,6 +14,10 @@ dependencies = [
     "openai>=1.108.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.1.1",
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "markdown>=3.5",
 ]
 
 [dependency-groups]
@@ -53,3 +57,4 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "src/main.py" = ["E402"]
 "agent/test_agent.py" = ["E402"]
+"email_interface/*.py" = ["E402"]

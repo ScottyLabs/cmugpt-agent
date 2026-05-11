@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -18,8 +20,54 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent import UserInput, run_agent
 from agent.streaming import stream_agent_response
+from email_interface.config import (
+    EMAIL_ENABLED,
+    EMAIL_POLL_INTERVAL,
+    EMAIL_TARGET_ADDRESS,
+)
+from email_interface.google_auth import has_google_credentials
+from email_interface.worker import EmailWorker
 
-app = FastAPI()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+_logger = logging.getLogger(__name__)
+
+email_worker: EmailWorker | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    global email_worker
+
+    if EMAIL_ENABLED and has_google_credentials() and EMAIL_TARGET_ADDRESS:
+        try:
+            email_worker = EmailWorker()
+            await email_worker.start()
+            _logger.info(
+                "Email interface started — polling %s every %ds",
+                EMAIL_TARGET_ADDRESS,
+                EMAIL_POLL_INTERVAL,
+            )
+        except Exception:
+            _logger.exception("Failed to start email worker")
+            email_worker = None
+    else:
+        if not EMAIL_ENABLED:
+            _logger.info("Email interface disabled (EMAIL_ENABLED != true)")
+        elif not EMAIL_TARGET_ADDRESS:
+            _logger.info("Email interface disabled (EMAIL_TARGET_ADDRESS not set)")
+        else:
+            _logger.info("Email interface disabled (no Google credentials found)")
+
+    yield
+
+    if email_worker:
+        await email_worker.stop()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
 # to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
