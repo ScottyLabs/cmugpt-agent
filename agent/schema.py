@@ -44,6 +44,27 @@ class Metadata(BaseModel):
     pass  # Add specific fields as needed
 
 
+class CmuMaps(BaseModel):
+    """CMU Maps iframe/link parameters for Surface."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None = Field(default=None, description="Embeddable CMU Maps URL")
+    mode: str | None = Field(
+        default=None,
+        description="'location' for one place, 'directions' for a route",
+    )
+    target: str | None = Field(
+        default=None,
+        description="Building/room ID used as the CMU Maps path segment",
+    )
+    target_label: str | None = Field(default=None, description="Human-readable target")
+    src: str | None = Field(default=None, description="CMU Maps source waypoint ID")
+    src_label: str | None = Field(default=None, description="Human-readable source")
+    dest: str | None = Field(default=None, description="CMU Maps destination ID")
+    dest_label: str | None = Field(default=None, description="Human-readable dest")
+
+
 class AgentResponse(BaseModel):
     """Structured response from the CMU-GPT Agent"""
 
@@ -61,6 +82,10 @@ class AgentResponse(BaseModel):
     response_text: str = Field(
         ...,
         description="Final response to user, formatted as GitHub-flavored Markdown",
+    )
+    cmu_maps: CmuMaps = Field(
+        default_factory=CmuMaps,
+        description="CMU Maps embed parameters; fields are null when inapplicable",
     )
     metadata: Metadata = Field(
         default_factory=Metadata, description="Additional context"

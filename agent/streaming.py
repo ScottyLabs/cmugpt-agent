@@ -25,6 +25,7 @@ non-streamed result, so streaming clients always get a usable answer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -35,11 +36,14 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from .agent_hub import (
+    _apply_cmu_maps_guard,
     _apply_tool_transparency_guard,
     _build_system_prompt,
     _call_mcp_tool,
+    _cmu_maps_success_text,
     _fallback_response,
     _get_mcp_tools,
+    _infer_cmu_maps,
     _parse_agent_response,
     _should_require_tool,
     _tool_metadata_message,
@@ -48,6 +52,11 @@ from .agent_hub import (
 from .schema import UserInput
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")
+
+# Pacing for synthetic "streaming" of canned text. Tuned to feel natural
+# without adding more than ~1s of perceived latency on typical canned blocks.
+_CANNED_CHUNK_SIZE = 12
+_CANNED_CHUNK_DELAY_SECONDS = 0.015
 
 StreamEvent = tuple[str, dict[str, Any]]
 
@@ -189,6 +198,16 @@ class _ResponseTextStreamer:
         return "".join(out_parts)
 
 
+async def _stream_text_in_chunks(text: str) -> AsyncIterator[StreamEvent]:
+    """Yield `text` as small paced delta events so it feels like streaming."""
+    if not text:
+        return
+    for i in range(0, len(text), _CANNED_CHUNK_SIZE):
+        yield ("delta", {"text": text[i : i + _CANNED_CHUNK_SIZE]})
+        if i + _CANNED_CHUNK_SIZE < len(text):
+            await asyncio.sleep(_CANNED_CHUNK_DELAY_SECONDS)
+
+
 def _final_streaming_instruction(services_used: list[str]) -> dict[str, str]:
     names = ", ".join(f"`{name}`" for name in services_used) or "none"
     return {
@@ -197,8 +216,8 @@ def _final_streaming_instruction(services_used: list[str]) -> dict[str, str]:
             "Final streaming instruction: the next assistant message is the "
             "final answer. Output only the strict JSON object. Put "
             '`response_text` first and begin with `{"response_text":`. Do '
-            "not put `thought`, `action`, `tool_calls`, or `services_used` "
-            "before `response_text`; those fields come after it. "
+            "not put `cmu_maps`, `thought`, `action`, `tool_calls`, or "
+            "`services_used` before `response_text`; those fields come after it. "
             f"Authoritative services_used for this turn: {names}."
         ),
     }
@@ -217,9 +236,19 @@ async def _run_streaming_loop(
     response_text incrementally or streams plain Markdown directly.
     """
     services_used: list[str] = []
+    tool_invocations: list[dict[str, Any]] = []
     final_content = ""
+    map_sent = False
 
     for _ in range(10):
+        inferred_cmu_maps = _infer_cmu_maps(messages, tool_invocations)
+        buffer_model_text = (
+            inferred_cmu_maps.mode == "directions" and bool(inferred_cmu_maps.url)
+        )
+        if buffer_model_text and not map_sent:
+            map_sent = True
+            yield ("map", inferred_cmu_maps.model_dump())
+
         chat_kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -269,7 +298,7 @@ async def _run_streaming_loop(
                 accumulated_content += delta.content
                 # Only stream deltas if this iteration produced no tool calls
                 # (heuristic: if we've started seeing tool_calls, stay silent).
-                if not tool_call_buf:
+                if not tool_call_buf and not buffer_model_text:
                     new_chars = text_streamer.feed(delta.content)
                     if new_chars:
                         yield ("delta", {"text": new_chars})
@@ -306,6 +335,9 @@ async def _run_streaming_loop(
                 except json.JSONDecodeError:
                     args = {}
                 result = await call_tool(name, args)
+                tool_invocations.append(
+                    {"name": name, "arguments": args, "result": result}
+                )
                 wrapped = (
                     f'<<<TOOL_OUTPUT name="{name}"'
                     ' trust="untrusted-data">>>\n'
@@ -321,6 +353,21 @@ async def _run_streaming_loop(
                 )
             messages.append(_tool_metadata_message(services_used))
             messages.append(_final_streaming_instruction(services_used))
+            cmu_maps = _infer_cmu_maps(messages, tool_invocations)
+            if cmu_maps.url and not map_sent:
+                map_sent = True
+                yield ("map", cmu_maps.model_dump())
+            if cmu_maps.mode == "directions" and cmu_maps.url:
+                parsed = _fallback_response(
+                    _cmu_maps_success_text(cmu_maps),
+                    confidence=0.9,
+                )
+                parsed.services_used = services_used
+                parsed.cmu_maps = cmu_maps
+                async for ev in _stream_text_in_chunks(parsed.response_text):
+                    yield ev
+                yield ("done", parsed.model_dump())
+                return
             yield ("status", {"text": "Writing answer..."})
             continue
 
@@ -336,13 +383,20 @@ async def _run_streaming_loop(
         )
         if services_used:
             fallback.services_used = services_used
-        yield ("delta", {"text": fallback.response_text})
+        fallback = _apply_cmu_maps_guard(fallback, messages, tool_invocations)
+        if fallback.cmu_maps.url and not map_sent:
+            yield ("map", fallback.cmu_maps.model_dump())
+        async for ev in _stream_text_in_chunks(fallback.response_text):
+            yield ev
         yield ("done", fallback.model_dump())
         return
 
     # Parse the final JSON for metadata + emit done.
     parsed = _parse_agent_response(final_content)
     parsed = _apply_tool_transparency_guard(parsed, messages, services_used)
+    parsed = _apply_cmu_maps_guard(parsed, messages, tool_invocations)
+    if parsed.cmu_maps.url and not map_sent:
+        yield ("map", parsed.cmu_maps.model_dump())
     yield ("done", parsed.model_dump())
 
 
