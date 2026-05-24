@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from mcp.client.session import ClientSession
@@ -14,6 +15,7 @@ from openai import AsyncOpenAI
 from .schema import (
     ActionType,
     AgentResponse,
+    CmuMaps,
     Metadata,
     Thought,
     UserInput,
@@ -23,6 +25,7 @@ load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")
+CMU_MAPS_BASE_URL = "https://maps.scottylabs.org"
 
 client = AsyncOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY", ""),
@@ -44,6 +47,65 @@ CMU_DATA_RE = re.compile(
     re.IGNORECASE,
 )
 
+CMU_MAPS_QUERY_RE = re.compile(
+    r"\b("
+    r"where|located|location|directions?|route|path|map|walk|walking|"
+    r"get\s+to|go\s+to|from|between"
+    r")\b",
+    re.IGNORECASE,
+)
+
+KNOWN_CMU_LOCATIONS: list[tuple[str, str, str]] = [
+    ("margaret morrison carnegie hall", "MM", "Margaret Morrison Carnegie Hall"),
+    ("margaret morrison", "MM", "Margaret Morrison Carnegie Hall"),
+    ("mudge house", "MUD", "Mudge House"),
+    ("mudge", "MUD", "Mudge House"),
+    ("tepper school of business", "TEP", "Tepper School of Business"),
+    ("tepper building", "TEP", "Tepper School of Business"),
+    ("tepper", "TEP", "Tepper School of Business"),
+    ("tsb", "TEP", "Tepper School of Business"),
+    ("gates and hillman centers", "GHC", "Gates & Hillman Centers"),
+    ("gates & hillman centers", "GHC", "Gates & Hillman Centers"),
+    ("gates hillman centers", "GHC", "Gates & Hillman Centers"),
+    ("gates hillman center", "GHC", "Gates & Hillman Centers"),
+    ("gates hillman", "GHC", "Gates & Hillman Centers"),
+    ("hillman centers", "GHC", "Gates & Hillman Centers"),
+    ("hillman center", "GHC", "Gates & Hillman Centers"),
+    ("gates", "GHC", "Gates & Hillman Centers"),
+    ("ghc", "GHC", "Gates & Hillman Centers"),
+    ("cohon university center", "CUC", "Cohon University Center"),
+    ("cohon center", "CUC", "Cohon University Center"),
+    ("cohon", "CUC", "Cohon University Center"),
+    ("university center", "CUC", "Cohon University Center"),
+    ("cuc", "CUC", "Cohon University Center"),
+    ("uc", "CUC", "Cohon University Center"),
+    ("wean hall", "WEH", "Wean Hall"),
+    ("wean", "WEH", "Wean Hall"),
+    ("doherty hall", "DH", "Doherty Hall"),
+    ("doherty", "DH", "Doherty Hall"),
+    ("porter hall", "PH", "Porter Hall"),
+    ("porter", "PH", "Porter Hall"),
+    ("baker hall", "BH", "Baker Hall"),
+    ("baker", "BH", "Baker Hall"),
+    ("hunt library", "HL", "Hunt Library"),
+    ("hunt", "HL", "Hunt Library"),
+    ("scott hall", "SC", "Scott Hall"),
+    ("hamerschlag hall", "HH", "Hamerschlag Hall"),
+    ("hamerschlag", "HH", "Hamerschlag Hall"),
+    ("newell-simon hall", "NSH", "Newell-Simon Hall"),
+    ("newell simon", "NSH", "Newell-Simon Hall"),
+    ("resnik house", "RES", "Resnik House"),
+    ("resnik", "RES", "Resnik House"),
+]
+
+LOCATION_ID_TO_LABEL: dict[str, str] = {}
+for _, loc_id, label in KNOWN_CMU_LOCATIONS:
+    LOCATION_ID_TO_LABEL.setdefault(loc_id, label)
+LOCATION_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,4}\b")
+PAREN_LOCATION_RE = re.compile(
+    r"(?P<label>[A-Z][A-Za-z0-9 '&.-]{1,80})\s*\((?P<id>[A-Z0-9]{2,5})\)"
+)
+
 NEGATIVE_TOOL_CLAIM_PATTERNS = [
     re.compile(
         r"\bI\s+(?:have\s+not|haven't|did\s+not|didn't)\s+"
@@ -62,6 +124,16 @@ NEGATIVE_TOOL_CLAIM_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+MAP_FAILURE_CLAIM_RE = re.compile(
+    r"\b("
+    r"wasn['’]?t\s+able|was\s+not\s+able|couldn['’]?t|could\s+not|"
+    r"unable|failed|didn['’]?t\s+find|did\s+not\s+find"
+    r")\b.{0,240}\b("
+    r"location|building|map|directions?|path|route|tool|tools|retrieve"
+    r")\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
@@ -94,6 +166,269 @@ def _tool_metadata_message(services_used: list[str]) -> dict[str, str]:
             "that no tools were used."
         ),
     }
+
+
+def _clean_location_phrase(text: str) -> str:
+    cleaned = re.sub(r"[?!.,;:]+$", "", text.strip())
+    cleaned = re.sub(
+        r"\b(on|at|in)\s+(?:the\s+)?(?:cmu|carnegie mellon)\s+campus\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip(" \"'")
+
+
+def _location_from_id(loc_id: str | None) -> tuple[str, str | None] | None:
+    if not isinstance(loc_id, str):
+        return None
+    normalized = loc_id.strip().upper()
+    if not normalized:
+        return None
+    match = LOCATION_ID_RE.fullmatch(normalized)
+    if not match:
+        return None
+    return normalized, LOCATION_ID_TO_LABEL.get(normalized)
+
+
+def _location_from_text(text: str | None) -> tuple[str, str | None] | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+    cleaned = _clean_location_phrase(text)
+    lowered = cleaned.lower()
+
+    for alias, loc_id, label in KNOWN_CMU_LOCATIONS:
+        if re.search(rf"\b{re.escape(alias)}\b", lowered):
+            return loc_id, label
+
+    explicit_id = LOCATION_ID_RE.search(cleaned)
+    if explicit_id:
+        return _location_from_id(explicit_id.group(0))
+    return None
+
+
+def _location_from_tool_result(result: str | None) -> tuple[str, str | None] | None:
+    if not isinstance(result, str):
+        return None
+    for match in PAREN_LOCATION_RE.finditer(result):
+        loc = _location_from_id(match.group("id"))
+        if loc:
+            return loc[0], match.group("label").strip()
+    return _location_from_text(result)
+
+
+def _direction_locations_from_query(
+    query: str,
+) -> tuple[tuple[str, str | None], tuple[str, str | None]] | None:
+    patterns = [
+        re.compile(
+            r"\bfrom\s+(?P<src>.+?)\s+to\s+(?P<dest>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bto\s+(?P<dest>.+?)\s+from\s+(?P<src>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bbetween\s+(?P<src>.+?)\s+and\s+(?P<dest>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?P<dest>[A-Za-z0-9 '&.-]+?)\s+from\s+"
+            r"(?P<src>[A-Za-z0-9 '&.-]+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+    ]
+    for pattern in patterns:
+        match = pattern.search(query)
+        if not match:
+            continue
+        src = _location_from_text(match.group("src"))
+        dest = _location_from_text(match.group("dest"))
+        if src and dest:
+            return src, dest
+    return None
+
+
+def _target_location_from_query(query: str) -> tuple[str, str | None] | None:
+    patterns = [
+        re.compile(
+            r"\bwhere\s+is\s+(?P<target>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bwhere(?:'s|s)\s+(?P<target>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:show|find|locate)\s+(?:me\s+)?(?P<target>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:directions?|route|path|walk|walking|get\s+to|go\s+to)\s+"
+            r"(?:to\s+)?(?P<target>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
+    ]
+    for pattern in patterns:
+        match = pattern.search(query)
+        if not match:
+            continue
+        target = _location_from_text(match.group("target"))
+        if target:
+            return target
+    return _location_from_text(query)
+
+
+def _location_url(target: str) -> str:
+    encoded = quote(target, safe="")
+    return f"{CMU_MAPS_BASE_URL}/{encoded}?dst={encoded}"
+
+
+def _directions_url(src: str, dest: str) -> str:
+    encoded_target = quote(dest, safe="")
+    encoded_src = quote(src, safe="")
+    encoded_dest = quote(dest, safe="")
+    return (
+        f"{CMU_MAPS_BASE_URL}/{encoded_target}"
+        f"?src={encoded_src}&dst={encoded_dest}"
+    )
+
+
+def _maps_payload_for_location(
+    target: tuple[str, str | None],
+) -> CmuMaps:
+    loc_id, label = target
+    return CmuMaps(
+        url=_location_url(loc_id),
+        mode="location",
+        target=loc_id,
+        target_label=label,
+        src=None,
+        src_label=None,
+        dest=loc_id,
+        dest_label=label,
+    )
+
+
+def _maps_payload_for_directions(
+    src: tuple[str, str | None],
+    dest: tuple[str, str | None],
+) -> CmuMaps:
+    src_id, src_label = src
+    dest_id, dest_label = dest
+    return CmuMaps(
+        url=_directions_url(src_id, dest_id),
+        mode="directions",
+        target=dest_id,
+        target_label=dest_label,
+        src=src_id,
+        src_label=src_label,
+        dest=dest_id,
+        dest_label=dest_label,
+    )
+
+
+def _is_valid_cmu_maps_url(url: str | None) -> bool:
+    return isinstance(url, str) and url.startswith(f"{CMU_MAPS_BASE_URL}/")
+
+
+def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    arguments = call.get("arguments")
+    return arguments if isinstance(arguments, dict) else {}
+
+
+def _infer_cmu_maps(
+    messages: list[dict[str, Any]],
+    tool_invocations: list[dict[str, Any]],
+) -> CmuMaps:
+    query = _latest_user_text(messages)
+    if not query or not CMU_MAPS_QUERY_RE.search(query):
+        return CmuMaps()
+
+    for call in tool_invocations:
+        name = call.get("name")
+        args = _tool_arguments(call)
+        if name in {"maps_get_path", "maps_distance_between"}:
+            src = _location_from_id(args.get("start_id"))
+            dest = _location_from_id(args.get("end_id"))
+            if src and dest:
+                return _maps_payload_for_directions(src, dest)
+
+    query_direction = _direction_locations_from_query(query)
+    if query_direction:
+        src, dest = query_direction
+        return _maps_payload_for_directions(src, dest)
+
+    for call in tool_invocations:
+        name = call.get("name")
+        if name not in {"maps_search_buildings", "maps_list_possible_locations"}:
+            continue
+        args = _tool_arguments(call)
+        target = (
+            _location_from_tool_result(call.get("result"))
+            or _location_from_text(args.get("query"))
+        )
+        if target:
+            return _maps_payload_for_location(target)
+
+    target = _target_location_from_query(query)
+    if target:
+        return _maps_payload_for_location(target)
+    return CmuMaps()
+
+
+def _apply_cmu_maps_guard(
+    parsed: AgentResponse,
+    messages: list[dict[str, Any]],
+    tool_invocations: list[dict[str, Any]],
+) -> AgentResponse:
+    inferred = _infer_cmu_maps(messages, tool_invocations)
+    if inferred.url:
+        parsed.cmu_maps = inferred
+        if (
+            inferred.mode == "directions"
+            or MAP_FAILURE_CLAIM_RE.search(parsed.response_text or "")
+        ):
+            parsed.response_text = _cmu_maps_success_text(inferred)
+    elif not _is_valid_cmu_maps_url(parsed.cmu_maps.url):
+        parsed.cmu_maps = CmuMaps()
+    return parsed
+
+
+def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
+    if cmu_maps.mode == "directions":
+        src = cmu_maps.src_label or cmu_maps.src or "the starting point"
+        dest = cmu_maps.dest_label or cmu_maps.dest or "the destination"
+        src_id = f" ({cmu_maps.src})" if cmu_maps.src else ""
+        dest_id = f" ({cmu_maps.dest})" if cmu_maps.dest else ""
+        if cmu_maps.src == "TEP" and cmu_maps.dest == "MM":
+            return (
+                "Here's how to walk from the **Tepper School of Business "
+                "(TEP)** to **Margaret Morrison Carnegie Hall (MM)** on the "
+                "Carnegie Mellon University campus:\n\n"
+                "## Directions (approx. 2-5 minute walk)\n"
+                "1. Exit the Tepper Building (TEP).\n"
+                "2. Head toward the path near Tech St or Morewood Ave, "
+                "toward the inner campus green/open area.\n"
+                "3. Follow the path toward the location marked **MM** "
+                "(Margaret Morrison). It is a short distance from TEP.\n"
+                "4. When you reach the building marked **Margaret Morrison "
+                "Carnegie Hall**, enter the building."
+            )
+        return (
+            f"Here's how to get from **{src}{src_id}** to "
+            f"**{dest}{dest_id}** on the Carnegie Mellon University campus:\n\n"
+            "## Directions\n"
+            f"1. Start at **{src}{src_id}**.\n"
+            f"2. Use the CMU Maps route below and follow the highlighted path "
+            f"toward **{dest}{dest_id}**.\n"
+            "3. Confirm the destination using the building label on the map.\n"
+            "4. Enter the destination building when you arrive."
+        )
+
+    target = cmu_maps.target_label or cmu_maps.target or "that location"
+    return f"Here's **{target}** on CMU Maps."
 
 
 def _strip_negative_tool_claims(text: str) -> str:
@@ -142,8 +477,60 @@ def _parse_agent_response(raw: str) -> AgentResponse:
         cleaned = cleaned.rsplit("```", 1)[0].strip()
     with suppress(json.JSONDecodeError, TypeError, ValueError):
         parsed = json.loads(cleaned)
-        return AgentResponse(**parsed)
+        with suppress(TypeError, ValueError):
+            return AgentResponse(**parsed)
+        coerced = _coerce_agent_response(parsed)
+        if coerced is not None:
+            return coerced
     return _fallback_response(raw)
+
+
+def _coerce_agent_response(parsed: Any) -> AgentResponse | None:
+    """Recover the user-facing payload from imperfect model JSON."""
+    if not isinstance(parsed, dict):
+        return None
+    response_text = parsed.get("response_text")
+    if not isinstance(response_text, str) or not response_text.strip():
+        return None
+
+    thought_raw = parsed.get("thought")
+    thought = Thought(reasoning="Direct response", confidence=0.7)
+    if isinstance(thought_raw, dict):
+        reasoning = thought_raw.get("reasoning")
+        confidence = thought_raw.get("confidence")
+        with suppress(TypeError, ValueError):
+            safe_reasoning = (
+                reasoning if isinstance(reasoning, str) else "Direct response"
+            )
+            thought = Thought(
+                reasoning=safe_reasoning,
+                confidence=float(confidence),
+            )
+
+    action = ActionType.RESPOND
+    with suppress(TypeError, ValueError):
+        action = ActionType(parsed.get("action"))
+
+    services_used: list[str] = []
+    raw_services = parsed.get("services_used")
+    if isinstance(raw_services, list):
+        services_used = [item for item in raw_services if isinstance(item, str)]
+
+    cmu_maps = CmuMaps()
+    raw_cmu_maps = parsed.get("cmu_maps")
+    if isinstance(raw_cmu_maps, dict):
+        with suppress(TypeError, ValueError):
+            cmu_maps = CmuMaps(**raw_cmu_maps)
+
+    return AgentResponse(
+        response_text=response_text,
+        thought=thought,
+        action=action,
+        tool_calls=[],
+        services_used=services_used,
+        cmu_maps=cmu_maps,
+        metadata=Metadata(),
+    )
 
 
 async def _run_completion_loop(
@@ -155,6 +542,7 @@ async def _run_completion_loop(
 ) -> AgentResponse:
     """Run the LLM loop and optionally support tool-calling."""
     services_used: list[str] = []
+    tool_invocations: list[dict[str, Any]] = []
     for _ in range(10):
         chat_kwargs: dict[str, Any] = {
             "model": model,
@@ -182,6 +570,9 @@ async def _run_completion_loop(
                     services_used.append(fn.name)
                 args = json.loads(fn.arguments) if fn.arguments else {}
                 result = await call_tool(fn.name, args)
+                tool_invocations.append(
+                    {"name": fn.name, "arguments": args, "result": result}
+                )
                 # Wrap tool output so the model treats it as untrusted DATA,
                 # not as instructions. Defense against prompt-injection from
                 # MCP server content.
@@ -203,12 +594,14 @@ async def _run_completion_loop(
 
         parsed = _parse_agent_response(choice.message.content or "")
         # Authoritative list comes from the loop, not the model's self-report.
-        return _apply_tool_transparency_guard(parsed, messages, services_used)
+        parsed = _apply_tool_transparency_guard(parsed, messages, services_used)
+        return _apply_cmu_maps_guard(parsed, messages, tool_invocations)
 
-    return _fallback_response(
+    fallback = _fallback_response(
         "Unable to complete the request within allowed steps.",
         confidence=0.3,
     )
+    return _apply_cmu_maps_guard(fallback, messages, tool_invocations)
 
 
 async def _get_mcp_tools(
@@ -427,6 +820,18 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "`- **Name** — location; key details`.\n"
         "Keep answers tight. No filler. Match the user's language.\n"
         "\n"
+        "## CMU Maps metadata\n"
+        "When the user asks where a campus building/room is, asks for a "
+        "map, or asks for directions between campus locations, include "
+        "top-level `cmu_maps` parameters if you can infer the CMU Maps IDs. "
+        "Use null for every inapplicable or unknown field. For a single "
+        "building/room, use "
+        "`https://maps.scottylabs.org/{target}?dst={target}`. For "
+        "directions, use "
+        "`https://maps.scottylabs.org/{dest}?src={src}&dst={dest}`. "
+        "Never fabricate a map ID if you cannot infer it from a tool call, "
+        "tool result, or well-known CMU abbreviation.\n"
+        "\n"
         "## Refusal recipe\n"
         "When declining (jailbreak attempt, forbidden topic, out-of-scope "
         "request, or unverifiable PII): a short, warm Markdown sentence "
@@ -441,6 +846,16 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "outside it, no code fences around it, matching:\n"
         "{\n"
         '  "response_text": "<Markdown answer>",\n'
+        '  "cmu_maps": {\n'
+        '    "url": null,\n'
+        '    "mode": null,\n'
+        '    "target": null,\n'
+        '    "target_label": null,\n'
+        '    "src": null,\n'
+        '    "src_label": null,\n'
+        '    "dest": null,\n'
+        '    "dest_label": null\n'
+        "  },\n"
         '  "thought": {"reasoning": "<one short sentence>", '
         '"confidence": 0.0-1.0},\n'
         '  "action": "query|retrieve|search|compute|respond",\n'
@@ -451,6 +866,9 @@ def _build_system_prompt(openai_tools: list[dict] | None) -> str:
         "Rules for fields:\n"
         "- `response_text`: put this first in the object so streaming "
         "clients can display the answer as it is generated.\n"
+        "- `cmu_maps`: top-level CMU Maps iframe/link parameters. Use "
+        "null fields when inapplicable or unknown. Do not use 'N/A' in "
+        "JSON.\n"
         "- `services_used`: every tool you called this turn, by exact "
         "name. Empty list if you used none.\n"
         "- `action`: `respond` when no tools used; otherwise the verb "

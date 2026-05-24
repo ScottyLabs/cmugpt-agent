@@ -181,6 +181,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
 
     Emits:
         event: status data: {"text": "<short progress label>"}
+        event: map    data: <CMU Maps payload JSON>
         event: delta  data: {"text": "<chunk of response_text>"}
         event: done   data: <full AgentResponse JSON>
         event: error  data: {"error": "...", "detail": "..."}
