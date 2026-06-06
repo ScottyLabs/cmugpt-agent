@@ -14,8 +14,10 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from email_interface.config import EMAIL_MODEL, EMAIL_TARGET_ADDRESS
-from email_interface.google_auth import get_google_auth
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+from email_interface.config import EMAIL_MODEL
 from email_interface.utils import (
     build_reply_message,
     extract_body_text,
@@ -93,22 +95,33 @@ class EmailHandler:
 
     Maintains per-thread message history so follow-up emails in the same
     Gmail thread retain conversational context.
+
+    Accepts Google ``Credentials`` externally so the caller controls where
+    tokens come from (Keycloak broker, direct OAuth, etc.).
     """
 
     _thread_histories: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     _processed_ids: set[str] = field(default_factory=set)
     _own_email: str | None = None
     _label_ids: dict[str, str] = field(default_factory=dict)
+    _gmail_service: Any = field(default=None, repr=False)
 
-    async def initialise(self) -> None:
-        """Resolve own email and ensure custom Gmail labels exist."""
-        try:
-            self._own_email = await self._resolve_own_email()
-            logger.info("Resolved own email address: %s", self._own_email)
-        except Exception:
-            logger.warning(
-                "Could not resolve own email — relying on query filtering"
+    async def initialise(self, credentials: Credentials) -> None:
+        """Build the Gmail service from *credentials*, resolve own email, and ensure labels.
+
+        Raises ``RuntimeError`` if the authenticated user's email address
+        cannot be determined — emails will only be sent from that address.
+        """
+        self._gmail_service = build("gmail", "v1", credentials=credentials)
+
+        self._own_email = await self._resolve_own_email()
+        if not self._own_email:
+            raise RuntimeError(
+                "Could not resolve the authenticated user's email address. "
+                "Emails can only be sent from the authenticated user's own "
+                "email. Check your Google credentials."
             )
+        logger.info("Resolved own email address: %s", self._own_email)
 
         try:
             await self._ensure_labels()
@@ -119,9 +132,10 @@ class EmailHandler:
     # Gmail API helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_gmail_service() -> Any:
-        return get_google_auth().gmail
+    def _get_gmail_service(self) -> Any:
+        if self._gmail_service is None:
+            raise RuntimeError("EmailHandler not initialised — call initialise() first")
+        return self._gmail_service
 
     async def _resolve_own_email(self) -> str:
         svc = self._get_gmail_service()
@@ -338,10 +352,14 @@ class EmailHandler:
         if not reply_subject.lower().startswith("re:"):
             reply_subject = f"Re: {reply_subject}"
 
-        from_address = self._own_email or EMAIL_TARGET_ADDRESS
+        if not self._own_email:
+            logger.error(
+                "Cannot send reply — authenticated user's email is not resolved"
+            )
+            return False
 
         reply_body = build_reply_message(
-            from_addr=from_address,
+            from_addr=self._own_email,
             to=email.sender_email,
             subject=reply_subject,
             body_html=response_html + quoted_html,

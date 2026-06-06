@@ -95,7 +95,7 @@ class GoogleAuth:
                     flow = InstalledAppFlow.from_client_secrets_file(
                         GOOGLE_CREDENTIALS_FILE, SCOPES
                     )
-                    creds = flow.run_local_server(port=0)
+                    creds = flow.run_local_server(port=8090)
 
                 if TOKEN_FILE:
                     with open(TOKEN_FILE, "w") as f:

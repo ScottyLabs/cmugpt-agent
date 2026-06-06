@@ -29,7 +29,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -46,6 +46,9 @@ from .agent_hub import (
     client,
 )
 from .schema import UserInput
+
+if TYPE_CHECKING:
+    pass
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")
 
@@ -68,9 +71,13 @@ def _build_messages(
     user_input: UserInput,
     openai_tools: list[dict] | None,
     history: list[dict[str, str]],
+    system_prompt_addendum: str | None = None,
 ) -> list[dict[str, Any]]:
     msgs: list[dict[str, Any]] = [
-        {"role": "system", "content": _build_system_prompt(openai_tools)}
+        {
+            "role": "system",
+            "content": _build_system_prompt(openai_tools, system_prompt_addendum),
+        }
     ]
     msgs.extend(history)
     msgs.append({"role": "user", "content": user_input.query})
@@ -362,7 +369,23 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
+    from email_interface.send_tool import (
+        SEND_EMAIL_TOOL_DEFINITION,
+        SEND_EMAIL_TOOL_NAME,
+        EmailSender,
+    )
+
     history = _sanitize_history(message_history)
+
+    builtin_tools: list[dict] = [SEND_EMAIL_TOOL_DEFINITION]
+    _email_sender = EmailSender()
+    _user_id = user_input.user_id or ""
+
+    async def _call_builtin(name: str, arguments: dict) -> str:
+        if name == SEND_EMAIL_TOOL_NAME:
+            arguments["user_id"] = _user_id
+            return await _email_sender.send(**arguments)
+        return f"Unknown built-in tool: {name}"
 
     if MCP_SERVER_URL:
         try:
@@ -376,26 +399,31 @@ async def stream_agent_response(
             ):
                 await session.initialize()
                 openai_tools = await _get_mcp_tools(session)
-                messages = _build_messages(user_input, openai_tools, history)
+                all_tools = openai_tools + builtin_tools
+                mcp_names = {t["function"]["name"] for t in openai_tools}
+
+                async def _call_tool(name: str, arguments: dict) -> str:
+                    if name in mcp_names:
+                        return await _call_mcp_tool(session, name, arguments)
+                    return await _call_builtin(name, arguments)
+
+                messages = _build_messages(user_input, all_tools, history)
                 async for ev in _run_streaming_loop(
                     messages=messages,
                     model=model,
-                    openai_tools=openai_tools,
-                    call_tool=lambda name, arguments: _call_mcp_tool(
-                        session, name, arguments
-                    ),
+                    openai_tools=all_tools,
+                    call_tool=_call_tool,
                 ):
                     yield ev
                 return
         except Exception:
-            # Fall through to non-tool streaming.
             pass
 
-    messages = _build_messages(user_input, None, history)
+    messages = _build_messages(user_input, builtin_tools, history)
     async for ev in _run_streaming_loop(
         messages=messages,
         model=model,
-        openai_tools=None,
-        call_tool=None,
+        openai_tools=builtin_tools,
+        call_tool=_call_builtin,
     ):
         yield ev

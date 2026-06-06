@@ -2,20 +2,66 @@
 
 Runs as an asyncio task, checking for messages labelled ``cmugpt-unread``
 sent to the configured target address at a regular interval.
+
+When Keycloak is configured, the worker fetches Google credentials via
+Keycloak's broker token endpoint. Otherwise it falls back to direct
+Google OAuth credentials.
 """
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
 from typing import Any
 
+from google.oauth2.credentials import Credentials
+
 from email_interface.config import EMAIL_POLL_INTERVAL, EMAIL_TARGET_ADDRESS
 from email_interface.handler import EmailHandler
+from email_interface.keycloak_auth import get_keycloak_client, keycloak_enabled
+from email_interface.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 5
 _BACKOFF_SECONDS = 300
+
+
+async def _resolve_credentials() -> Credentials | None:
+    """Resolve Google credentials from Keycloak or direct config.
+
+    When Keycloak is enabled, picks the first registered user from the
+    token store and fetches their Google token via Keycloak's broker
+    endpoint. Returns ``None`` if Keycloak is the sole provider but no
+    users have completed OAuth yet.
+
+    Falls back to direct GoogleAuth credentials only when Keycloak is
+    not configured.
+    """
+    if keycloak_enabled():
+        store = TokenStore()
+        kc = get_keycloak_client()
+        keycloak_sub = store.get_first_keycloak_sub()
+        if keycloak_sub:
+            creds = await kc.get_gmail_credentials(keycloak_sub)
+            if creds:
+                logger.info("Worker using Keycloak-brokered Google credentials")
+                return creds
+            logger.warning(
+                "Keycloak broker token unavailable for sub %s", keycloak_sub
+            )
+        else:
+            logger.info(
+                "Keycloak enabled but no users registered yet — "
+                "email worker will start once a user completes /auth/gmail/start"
+            )
+        return None
+
+    from email_interface.google_auth import get_google_auth
+
+    auth = get_google_auth()
+    return auth._get_credentials()
 
 
 class EmailWorker:
@@ -38,8 +84,16 @@ class EmailWorker:
             logger.warning("EmailWorker is already running")
             return
 
+        credentials = await _resolve_credentials()
+        if credentials is None:
+            logger.info(
+                "EmailWorker deferred — no credentials available yet. "
+                "A user must complete OAuth via /auth/gmail/start first."
+            )
+            return
+
         self._handler = EmailHandler()
-        await self._handler.initialise()
+        await self._handler.initialise(credentials)
         self._running = True
         self._task = asyncio.create_task(self._poll_loop(), name="email-worker")
         logger.info(

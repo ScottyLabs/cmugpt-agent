@@ -140,7 +140,37 @@ def quote_original_message_html(
     )
 
 
+def build_new_message(
+    from_addr: str,
+    to: str,
+    subject: str,
+    body_html: str,
+    body_plain: str,
+) -> dict:
+    """Build a Gmail API-ready new message (not a reply).
+
+    ``from_addr`` is the authenticated user's email and is required.
+
+    Returns a dict with ``raw`` (base64url-encoded MIME message).
+    """
+    if not from_addr:
+        raise ValueError(
+            "from_addr is required — emails must be sent from the authenticated user's email"
+        )
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"CMUGPT <{from_addr}>"
+    msg["To"] = to
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(body_plain + EMAIL_SIGNATURE_PLAIN, "plain"))
+    msg.attach(MIMEText(body_html + EMAIL_SIGNATURE_HTML, "html"))
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    return {"raw": raw}
+
+
 def build_reply_message(
+    from_addr: str,
     to: str,
     subject: str,
     body_html: str,
@@ -148,15 +178,18 @@ def build_reply_message(
     original_message_id: str,
     references: str = "",
     thread_id: str | None = None,
-    from_addr: str | None = None,
 ) -> dict:
     """Build a Gmail API-ready reply message with proper threading headers.
 
+    ``from_addr`` is the authenticated user's email and is required — emails
+    are only sent from the user's own address.
+
     Returns a dict with ``raw`` (base64url-encoded) and optionally ``threadId``.
     """
+    if not from_addr:
+        raise ValueError("from_addr is required — emails must be sent from the authenticated user's email")
     msg = MIMEMultipart("alternative")
-    if from_addr:
-        msg["From"] = f"CMUGPT <{from_addr}>"
+    msg["From"] = f"CMUGPT <{from_addr}>"
     msg["To"] = to
     msg["Subject"] = subject
     if original_message_id:

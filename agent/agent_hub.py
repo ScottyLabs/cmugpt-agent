@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import os
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from mcp.client.session import ClientSession
@@ -18,6 +20,9 @@ from .schema import (
     Thought,
     UserInput,
 )
+
+if TYPE_CHECKING:
+    pass
 
 load_dotenv()
 
@@ -483,6 +488,7 @@ async def run_agent(
         user_input: UserInput object containing the query.
         model: The model to use via OpenRouter.
         message_history: Optional conversation history.
+        system_prompt_addendum: Extra text appended to the system prompt.
 
     Returns:
         AgentResponse with thought, action, and response_text.
@@ -492,6 +498,12 @@ async def run_agent(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
         )
+
+    from email_interface.send_tool import (
+        SEND_EMAIL_TOOL_DEFINITION,
+        SEND_EMAIL_TOOL_NAME,
+        EmailSender,
+    )
 
     # Strip any non-user/assistant turns from caller-supplied history. We own
     # the system prompt; smuggled `system` or `tool` turns are an injection
@@ -506,6 +518,18 @@ async def run_agent(
             and isinstance(t.get("content"), str)
         ]
 
+    # The send_email tool is always advertised; per-user auth is checked
+    # at call time. The agent injects user_id so the LLM cannot choose it.
+    builtin_tools: list[dict] = [SEND_EMAIL_TOOL_DEFINITION]
+    _email_sender = EmailSender()
+    _user_id = user_input.user_id or ""
+
+    async def _call_builtin(name: str, arguments: dict) -> str:
+        if name == SEND_EMAIL_TOOL_NAME:
+            arguments["user_id"] = _user_id
+            return await _email_sender.send(**arguments)
+        return f"Unknown built-in tool: {name}"
+
     if MCP_SERVER_URL:
         try:
             async with (
@@ -518,11 +542,21 @@ async def run_agent(
             ):
                 await session.initialize()
                 openai_tools = await _get_mcp_tools(session)
+                all_tools = openai_tools + builtin_tools
+                mcp_names = {
+                    t["function"]["name"] for t in openai_tools
+                }
+
+                async def _call_tool(name: str, arguments: dict) -> str:
+                    if name in mcp_names:
+                        return await _call_mcp_tool(session, name, arguments)
+                    return await _call_builtin(name, arguments)
+
                 messages: list[dict] = [
                     {
                         "role": "system",
                         "content": _build_system_prompt(
-                            openai_tools, system_prompt_addendum
+                            all_tools, system_prompt_addendum
                         ),
                     }
                 ]
@@ -532,18 +566,21 @@ async def run_agent(
                 return await _run_completion_loop(
                     messages,
                     model=model,
-                    openai_tools=openai_tools,
-                    call_tool=lambda name, arguments: _call_mcp_tool(
-                        session, name, arguments
-                    ),
+                    openai_tools=all_tools,
+                    call_tool=_call_tool,
                 )
         except Exception:
-            # If MCP is unavailable, continue without tool-calling.
             pass
 
-    prompt = _build_system_prompt(None, system_prompt_addendum)
+    prompt = _build_system_prompt(builtin_tools, system_prompt_addendum)
     messages = [{"role": "system", "content": prompt}]
     if safe_history:
         messages.extend(safe_history)
     messages.append({"role": "user", "content": user_input.query})
-    return await _run_completion_loop(messages, model=model)
+
+    return await _run_completion_loop(
+        messages,
+        model=model,
+        openai_tools=builtin_tools,
+        call_tool=_call_builtin,
+    )

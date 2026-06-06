@@ -18,3 +18,4 @@ wheels/
 # Google OAuth tokens and credentials
 token.json
 credentials.json
+gmail_tokens.db

@@ -26,7 +26,12 @@ from email_interface.config import (
     EMAIL_TARGET_ADDRESS,
 )
 from email_interface.google_auth import has_google_credentials
+from email_interface.keycloak_auth import keycloak_enabled
 from email_interface.worker import EmailWorker
+
+def _has_any_credentials() -> bool:
+    """True if Keycloak or direct Google credentials are available."""
+    return keycloak_enabled() or has_google_credentials()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +46,12 @@ email_worker: EmailWorker | None = None
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     global email_worker
 
-    if EMAIL_ENABLED and has_google_credentials() and EMAIL_TARGET_ADDRESS:
+    if keycloak_enabled():
+        _logger.info("Keycloak OAuth broker enabled — sole token provider for Gmail")
+    else:
+        _logger.info("Keycloak not configured — using direct Google OAuth credentials")
+
+    if EMAIL_ENABLED and _has_any_credentials() and EMAIL_TARGET_ADDRESS:
         try:
             email_worker = EmailWorker()
             await email_worker.start()
@@ -59,7 +69,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         elif not EMAIL_TARGET_ADDRESS:
             _logger.info("Email interface disabled (EMAIL_TARGET_ADDRESS not set)")
         else:
-            _logger.info("Email interface disabled (no Google credentials found)")
+            _logger.info("Email interface disabled (no credentials found — configure Keycloak or Google OAuth)")
 
     yield
 
@@ -67,7 +77,10 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         await email_worker.stop()
 
 
+from auth_routes import auth_router
+
 app = FastAPI(lifespan=lifespan)
+app.include_router(auth_router)
 
 # Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
 # to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
