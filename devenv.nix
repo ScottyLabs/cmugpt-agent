@@ -7,11 +7,19 @@
   scottylabs = {
     enable = true;
     project.name = "cmugpt-agent";
-
-    kennel.services.agent = {
-      customDomain = "api.cmugpt-agent.scottylabs.org";
-    };
+    secrets.enable = false;
+  };
+  scottylabs.kennel.services.api = {
+    customDomain = "api.cmugpt-agent.scottylabs.org";
+    oidc.redirectPaths = [ "/oauth2/callback" ];
   };
 
+  scottylabs.postgres.enable = true;
+
   processes.agent.exec = "${pkgs.cmugptAgent}/bin/cmugpt-agent";
+
+  secrets = {
+      enable = true;
+      vaultEndpoint = "https://secrets2.scottylabs.org";
+    };
 }
