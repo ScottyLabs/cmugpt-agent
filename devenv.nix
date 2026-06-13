@@ -8,16 +8,10 @@
     enable = true;
     project.name = "cmugpt-agent";
 
-    kennel.services.agent = { };
-
-    postgres.enable = true;
-  };
-
-  processes.agent = {
-    exec = "${pkgs.cmugptAgent}/bin/cmugpt-agent";
-    ready.http.get = {
-      port = 5000;
-      path = "/health";
+    kennel.services.agent = {
+      customDomain = "api.cmugpt-agent.scottylabs.org";
     };
   };
+
+  processes.agent.exec = "${pkgs.cmugptAgent}/bin/cmugpt-agent";
 }
