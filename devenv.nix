@@ -11,8 +11,13 @@
   };
   scottylabs.kennel.services.api = {
     customDomain = "api.cmugpt-agent.scottylabs.org";
-    oidc.redirectPaths = [ "/oauth2/callback" ];
+    # oidc.redirectPaths = [ "/oauth2/callback" ];
   };
+
+  processes.api = {
+  exec = "${pkgs.my-project}/bin/api";
+  ready.http.get = { port = 8080; path = "/health"; };
+};
 
   scottylabs.postgres.enable = true;
 
