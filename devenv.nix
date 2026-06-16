@@ -1,68 +1,36 @@
-{ pkgs, inputs, lib, config, ... }:
-
-let
-  localFlake = builtins.getFlake (toString ./.);
-  system = pkgs.stdenv.hostPlatform.system;
-  selfPkgs = localFlake.packages.${system};
-in
+{ pkgs, inputs, ... }:
 {
-  imports = [
-    inputs.scottylabs.devenvModules.default
-  ];
+  imports = [ inputs.scottylabs.devenvModules.default ];
 
   scottylabs = {
     enable = true;
     project.name = "cmugpt-agent";
     secrets.enable = true;
+    postgres.enable = false;
+
+    kennel.services.agent = {
+      customDomain = "api.cmugpt-agent.scottylabs.org";
+    };
   };
 
-  scottylabs.kennel.services.agent = {
-    customDomain = "api.cmugpt-agent.scottylabs.org";
-  };
+  cachix.enable = false;
 
-  # Make your shell aware of python and its dependencies directly 
   languages.python = {
     enable = true;
     package = pkgs.python312;
     poetry.enable = false;
-    uv.enable = false;
+    uv.enable = true;
   };
-
-  # Direct packages injection into the environment to completely destroy any pathing bugs
-  packages = with pkgs.python312Packages; [
-    fastapi
-    uvicorn
-    httpx
-    mcp
-    openai
-    pydantic
-    python-dotenv
-  ];
-
-  processes.api = {
-    # Run natively out of your source directory using the un-sandboxed python interpreter
-    exec = "python src/main.py";
-    env = {
-      PORT = "8080";
-    };
-    ready.http.get = { port = 8080; path = "/health"; };
-  };
-
-  scottylabs.postgres.enable = false;
 
   processes.agent = {
-    # If agent uses a different entry point (e.g. src/agent.py or main.py on different port), adjust accordingly
-    exec = "python src/main.py";
-    env = {
-      PORT = "5000";
-    };
-    ready.http.get = { port = 8080; path = "/health"; };
+    exec = "secretspec run --profile dev -- uv run python src/main.py";
+    env.PORT = "5000";
+    ready.http.get = { port = 5000; path = "/health"; };
   };
 
-  secretspec = {
-    profile = "prod";
-    provider = "vault://secrets2.scottylabs.org/secret";
-  };
+  enterShell = ''
+    [ -f .env ] || touch .env
+  '';
 
-  dotenv.disableHint = true;
+  env.VAULT_ADDR = "https://secrets2.scottylabs.org";
 }

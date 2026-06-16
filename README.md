@@ -37,6 +37,31 @@ You can set the `PORT` environment variable to change the listening port (defaul
 PORT=8080 uv run python src/main.py
 ```
 
+## Deployment (Kennel)
+
+Production runs on Kennel via devenv and secretspec. Pushes to **Codeberg** `main` trigger deploys (GitHub mirror pushes do not).
+
+URLs:
+
+- https://api.cmugpt-agent.scottylabs.org (custom domain)
+- https://cmugpt-agent-agent-main.scottylabs.net (default Kennel URL)
+
+Validate locally before pushing:
+
+```sh
+SECRETSPEC_PROVIDER=dotenv://.env devenv build scottylabs.kennel.config
+nix build .#packages.x86_64-linux.agent
+```
+
+Set production secrets (requires `cmugpt-agent-admins` group and `bao login -method=oidc`):
+
+```sh
+secretspec set -P prod OPENROUTER_API_KEY
+secretspec set -P prod MCP_SERVER_URL
+secretspec set -P prod AGENT_SHARED_SECRET
+secretspec check -P prod
+```
+
 ## Guidelines
 
 You should not globally disable rules enforced by `ruff` or `ty`. If absolutely necessary, you can ignore them on a line-by-line basis:
