@@ -48,7 +48,7 @@ in
     ready.http.get = { port = 8080; path = "/health"; };
   };
 
-  scottylabs.postgres.enable = true;
+  scottylabs.postgres.enable = false;
 
   processes.agent = {
     # If agent uses a different entry point (e.g. src/agent.py or main.py on different port), adjust accordingly
