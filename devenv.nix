@@ -16,7 +16,7 @@ in
     secrets.enable = false;
   };
 
-  scottylabs.kennel.services.api = {
+  scottylabs.kennel.services.agent = {
     customDomain = "api.cmugpt-agent.scottylabs.org";
   };
 
