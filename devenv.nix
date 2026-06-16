@@ -59,7 +59,7 @@ in
   };
 
   secretspec = {
-    profile = "dev";
+    profile = "prod";
     provider = "vault://secrets2.scottylabs.org/secret";
   };
 
