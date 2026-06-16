@@ -1,7 +1,7 @@
 secretspec:
   enable: true
   provider: vault://secrets2.scottylabs.org/secret
-  profile: prod
+  profile: dev
 
 inputs:
   scottylabs:
