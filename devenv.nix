@@ -13,7 +13,7 @@ in
   scottylabs = {
     enable = true;
     project.name = "cmugpt-agent";
-    secrets.enable = false;
+    secrets.enable = true;
   };
 
   scottylabs.kennel.services.agent = {
@@ -56,6 +56,7 @@ in
     env = {
       PORT = "5000";
     };
+    ready.http.get = { port = 8080; path = "/health"; };
   };
 
   secretspec = {

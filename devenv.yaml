@@ -1,3 +1,8 @@
+secretspec:
+  enable: true
+  provider: vault://secrets2.scottylabs.org/secret
+  profile: prod
+
 inputs:
   scottylabs:
     url: git+https://codeberg.org/ScottyLabs/devenv
@@ -13,7 +18,3 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
-secretspec:
-  enable: true
-  provider: vault://secrets2.scottylabs.org/secret
-  profile: prod
