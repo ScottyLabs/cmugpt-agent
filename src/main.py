@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         await email_worker.stop()
 
 
-from auth_routes import auth_router
+from src.auth_routes import auth_router
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth_router)

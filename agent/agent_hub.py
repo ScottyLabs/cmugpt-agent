@@ -167,8 +167,15 @@ async def _run_completion_loop(
         }
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
+        # Only force a tool call when data-retrieval tools (MCP) are
+        # available — not when the only tool is send_email, which should
+        # only fire when the user explicitly asks to send an email.
+        has_data_tools = openai_tools and any(
+            t.get("function", {}).get("name") != "send_email"
+            for t in openai_tools
+        )
         if (
-            openai_tools
+            has_data_tools
             and call_tool is not None
             and not services_used
             and _should_require_tool(messages)
@@ -388,7 +395,10 @@ def _build_system_prompt(
         f"{tool_catalog}\n"
         "\n"
         "RULES:\n"
-        "- If a tool fits the question, CALL it now in the same turn.\n"
+        "- If a DATA-RETRIEVAL tool fits the question, CALL it now in "
+        "the same turn.\n"
+        "- When the `send_email` tool is available, the user has asked "
+        "for an email — go ahead and use it to fulfil their request.\n"
         "- NEVER reply with phrases like 'please hold on', 'I will "
         "query', 'one moment', 'let me check that for you', 'I'll get "
         "back to you'. Either call a tool now or answer now.\n"
@@ -518,9 +528,20 @@ async def run_agent(
             and isinstance(t.get("content"), str)
         ]
 
-    # The send_email tool is always advertised; per-user auth is checked
-    # at call time. The agent injects user_id so the LLM cannot choose it.
-    builtin_tools: list[dict] = [SEND_EMAIL_TOOL_DEFINITION]
+    # Only offer the send_email tool when the CURRENT user message mentions
+    # sending/emailing.  This prevents the model from proactively calling
+    # send_email on ordinary queries.  We intentionally do NOT check
+    # conversation history — if a prior turn mentioned email, the tool was
+    # available for that turn; a new turn must re-state the intent.
+    _EMAIL_INTENT_RE = re.compile(
+        r"\b(email|e-mail|mail\b.{0,15}\b(me|to|this|that|it|him|her|them))",
+        re.IGNORECASE,
+    )
+    _user_wants_email = bool(_EMAIL_INTENT_RE.search(user_input.query))
+
+    builtin_tools: list[dict] = (
+        [SEND_EMAIL_TOOL_DEFINITION] if _user_wants_email else []
+    )
     _email_sender = EmailSender()
     _user_id = user_input.user_id or ""
 

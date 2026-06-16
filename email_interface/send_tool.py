@@ -31,9 +31,9 @@ SEND_EMAIL_TOOL_DEFINITION: dict[str, Any] = {
         "name": SEND_EMAIL_TOOL_NAME,
         "description": (
             "Send an email from the user's own Gmail address. "
-            "Use when the user asks you to email someone or send "
-            'themselves an email. Set `to` to "self" to send to the '
-            "user's own inbox. The user must have authorised Gmail first."
+            "Use this tool to compose and send an email as the user "
+            'requested. Set `to` to "self" to send to the user\'s own '
+            "inbox. The user must have authorised Gmail first."
         ),
         "parameters": {
             "type": "object",

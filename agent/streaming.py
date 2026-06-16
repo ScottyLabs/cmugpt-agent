@@ -26,7 +26,9 @@ non-streamed result, so streaming clients always get a usable answer.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
@@ -46,6 +48,14 @@ from .agent_hub import (
     client,
 )
 from .schema import UserInput
+
+_log = logging.getLogger(__name__)
+
+# Only expose the send_email tool when the user explicitly mentions email.
+_EMAIL_INTENT_RE = re.compile(
+    r"\b(email|e-mail|mail\b.{0,15}\b(me|to|this|that|it|him|her|them))",
+    re.IGNORECASE,
+)
 
 if TYPE_CHECKING:
     pass
@@ -234,7 +244,13 @@ async def _run_streaming_loop(
         }
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
-        if openai_tools and not services_used and _should_require_tool(messages):
+        # Only force tool_choice="required" when real data tools exist,
+        # never when the only tool is send_email.
+        has_data_tools = openai_tools and any(
+            t.get("function", {}).get("name") != "send_email"
+            for t in openai_tools
+        )
+        if has_data_tools and not services_used and _should_require_tool(messages):
             chat_kwargs["tool_choice"] = "required"
 
         stream = await client.chat.completions.create(**chat_kwargs)
@@ -377,11 +393,26 @@ async def stream_agent_response(
 
     history = _sanitize_history(message_history)
 
-    builtin_tools: list[dict] = [SEND_EMAIL_TOOL_DEFINITION]
+    # Only expose send_email when the *current* user message mentions email.
+    _user_wants_email = bool(_EMAIL_INTENT_RE.search(user_input.query))
+    builtin_tools: list[dict] = (
+        [SEND_EMAIL_TOOL_DEFINITION] if _user_wants_email else []
+    )
+    _log.info(
+        "STREAM EMAIL GATE: query=%r wants_email=%s builtin_tools=%d",
+        user_input.query[:80],
+        _user_wants_email,
+        len(builtin_tools),
+    )
+
     _email_sender = EmailSender()
     _user_id = user_input.user_id or ""
+    _allowed_builtin_names = {t["function"]["name"] for t in builtin_tools}
 
     async def _call_builtin(name: str, arguments: dict) -> str:
+        # Guard: only execute tools that were actually offered to the model.
+        if name not in _allowed_builtin_names:
+            return f"Tool '{name}' is not available for this request."
         if name == SEND_EMAIL_TOOL_NAME:
             arguments["user_id"] = _user_id
             return await _email_sender.send(**arguments)
