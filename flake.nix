@@ -48,7 +48,7 @@
           ];
 
           # Let the build sandbox check imports natively to prove it works
-          pythonImportsCheck = [ "fastapi" "uvicorn" ];
+          pythonImportsCheck = [ "src.main" "agent" ];
 
           meta.mainProgram = "cmugpt-agent";
         };
