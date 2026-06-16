@@ -14,3 +14,25 @@ wheels/
 
 # Environment Keys
 .env
+
+# Nix / devenv
+.devenv/
+.devenv.flake.nix
+.pre-commit-config.yaml
+result
+result-*
+
+# AI
+.mcp.json
+.claude
+
+# direnv
+.direnv/
+
+# Rust
+target/
+.cargo/
+
+# OS
+.DS_Store
+rustc-ice-*.txt
