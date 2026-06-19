@@ -9,6 +9,49 @@ preserved verbatim.
 
 from langchain_core.tools import BaseTool
 
+# Substrings that mark a tool as capable of returning a route/path between two
+# points (as opposed to merely locating a single building). Matched against tool
+# names so the prompt can adapt to whatever the MCP server actually exposes.
+_ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
+
+
+def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
+    return any(
+        any(hint in (tool.name or "").lower() for hint in _ROUTING_TOOL_HINTS)
+        for tool in (tools or [])
+    )
+
+
+def _directions_section(has_routing_tool: bool) -> str:
+    """Directions guidance, tailored to whether a routing tool is available.
+
+    Without a routing tool the model cannot compute a real route, so it must not
+    invent turn-by-turn steps or claim a lookup failed — the deterministic map
+    attached to the answer is the source of truth for the route.
+    """
+    if has_routing_tool:
+        return (
+            "## Directions and campus navigation\n"
+            "When the user asks how to get from one campus location to another, "
+            "call the routing/path tool and base a short numbered list of "
+            "walking steps on the route it returns. An interactive campus map "
+            "of that route is attached to your answer automatically, so point "
+            "the user to it. Do NOT fabricate precise distances or times you "
+            "cannot derive from the tool.\n"
+        )
+    return (
+        "## Directions and campus navigation\n"
+        "You do NOT have a routing or turn-by-turn directions tool, so you "
+        "cannot compute an exact walking route. When the user asks how to get "
+        "somewhere: do NOT invent step-by-step turns, distances, or times, and "
+        "do NOT say that a lookup or data retrieval failed — it did not. An "
+        "interactive campus map of the route is attached to your answer "
+        "automatically; point the user to it and tell them to follow the "
+        "highlighted path. You may add one or two sentences of general "
+        "orientation (overall direction or a nearby landmark) only if you are "
+        "confident from general knowledge, and say it is approximate.\n"
+    )
+
 
 def build_system_prompt(tools: list[BaseTool] | None) -> str:
     """Compose the system prompt, injecting any discovered MCP tools."""
@@ -21,6 +64,8 @@ def build_system_prompt(tools: list[BaseTool] | None) -> str:
             short = desc[0] if desc else ""
             lines.append(f"- `{name}`: {short}" if short else f"- `{name}`")
         tool_catalog = "Available tools (call them by exact name):\n" + "\n".join(lines)
+
+    directions_section = _directions_section(_has_routing_tool(tools))
 
     return (
         "You are CMUGPT, a friendly and concise assistant for Carnegie "
@@ -112,15 +157,7 @@ def build_system_prompt(tools: list[BaseTool] | None) -> str:
         "the user the lookup didn't return anything and recommend a "
         "primary source. Do NOT invent a plausible-sounding answer.\n"
         "\n"
-        "## Directions and campus navigation\n"
-        "When the user asks how to get from one campus location to another, "
-        "give directions specific to that route. If a routing/path tool is "
-        "available, call it and base your step-by-step directions on the "
-        "route it returns. An interactive campus map of the suggested route "
-        "is attached to your answer automatically, so point the user to it "
-        "and do NOT fabricate precise turn-by-turn steps, distances, or times "
-        "you cannot derive from a tool. If routing data is unavailable, give "
-        "a brief, honest high-level description and refer them to the map.\n"
+        f"{directions_section}"
         "\n"
         "## Tool-use policy (critical)\n"
         f"{tool_catalog}\n"

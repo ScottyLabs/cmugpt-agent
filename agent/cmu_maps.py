@@ -10,6 +10,11 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from .buildings import (
+    KNOWN_CMU_LOCATIONS,
+    LOCATION_ID_TO_LABEL,
+    normalize,
+)
 from .guards import latest_user_text
 from .schema import AgentResponse, CmuMaps
 
@@ -23,52 +28,8 @@ CMU_MAPS_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
-KNOWN_CMU_LOCATIONS: list[tuple[str, str, str]] = [
-    ("margaret morrison carnegie hall", "MM", "Margaret Morrison Carnegie Hall"),
-    ("margaret morrison", "MM", "Margaret Morrison Carnegie Hall"),
-    ("mudge house", "MUD", "Mudge House"),
-    ("mudge", "MUD", "Mudge House"),
-    ("tepper school of business", "TEP", "Tepper School of Business"),
-    ("tepper building", "TEP", "Tepper School of Business"),
-    ("tepper", "TEP", "Tepper School of Business"),
-    ("tsb", "TEP", "Tepper School of Business"),
-    ("gates and hillman centers", "GHC", "Gates & Hillman Centers"),
-    ("gates & hillman centers", "GHC", "Gates & Hillman Centers"),
-    ("gates hillman centers", "GHC", "Gates & Hillman Centers"),
-    ("gates hillman center", "GHC", "Gates & Hillman Centers"),
-    ("gates hillman", "GHC", "Gates & Hillman Centers"),
-    ("hillman centers", "GHC", "Gates & Hillman Centers"),
-    ("hillman center", "GHC", "Gates & Hillman Centers"),
-    ("gates", "GHC", "Gates & Hillman Centers"),
-    ("ghc", "GHC", "Gates & Hillman Centers"),
-    ("cohon university center", "CUC", "Cohon University Center"),
-    ("cohon center", "CUC", "Cohon University Center"),
-    ("cohon", "CUC", "Cohon University Center"),
-    ("university center", "CUC", "Cohon University Center"),
-    ("cuc", "CUC", "Cohon University Center"),
-    ("uc", "CUC", "Cohon University Center"),
-    ("wean hall", "WEH", "Wean Hall"),
-    ("wean", "WEH", "Wean Hall"),
-    ("doherty hall", "DH", "Doherty Hall"),
-    ("doherty", "DH", "Doherty Hall"),
-    ("porter hall", "PH", "Porter Hall"),
-    ("porter", "PH", "Porter Hall"),
-    ("baker hall", "BH", "Baker Hall"),
-    ("baker", "BH", "Baker Hall"),
-    ("hunt library", "HL", "Hunt Library"),
-    ("hunt", "HL", "Hunt Library"),
-    ("scott hall", "SC", "Scott Hall"),
-    ("hamerschlag hall", "HH", "Hamerschlag Hall"),
-    ("hamerschlag", "HH", "Hamerschlag Hall"),
-    ("newell-simon hall", "NSH", "Newell-Simon Hall"),
-    ("newell simon", "NSH", "Newell-Simon Hall"),
-    ("resnik house", "RES", "Resnik House"),
-    ("resnik", "RES", "Resnik House"),
-]
-
-LOCATION_ID_TO_LABEL: dict[str, str] = {}
-for _, _loc_id, _label in KNOWN_CMU_LOCATIONS:
-    LOCATION_ID_TO_LABEL.setdefault(_loc_id, _label)
+# `KNOWN_CMU_LOCATIONS` (alias -> code/name) and `LOCATION_ID_TO_LABEL`
+# (code -> name) are derived from buildings.json by agent/buildings.py.
 LOCATION_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,4}\b")
 PAREN_LOCATION_RE = re.compile(
     r"(?P<label>[A-Z][A-Za-z0-9 '&.-]{1,80})\s*\((?P<id>[A-Z0-9]{2,5})\)"
@@ -77,11 +38,21 @@ PAREN_LOCATION_RE = re.compile(
 MAP_FAILURE_CLAIM_RE = re.compile(
     r"\b("
     r"wasn['’]?t\s+able|was\s+not\s+able|couldn['’]?t|could\s+not|"
-    r"unable|failed|didn['’]?t\s+find|did\s+not\s+find"
-    r")\b.{0,240}\b("
-    r"location|building|map|directions?|path|route|tool|tools|retrieve"
+    r"cannot|can['’]?t|unable|failed|fail|error|issue|problem|trouble|"
+    r"didn['’]?t\s+find|did\s+not\s+find"
+    r")\b.{0,200}?\b("
+    r"look(?:ing|ed)?\s*up|retriev\w*|find(?:ing)?|locat(?:e|ing|ions?)|"
+    r"data|directions?|route|path|building"
     r")\b",
     re.IGNORECASE | re.DOTALL,
+)
+
+# Sentences that push the user to an external map/site for directions. When we
+# have our own embeddable map, these recommendations are wrong, so the repair
+# step drops them.
+EXTERNAL_MAP_REDIRECT_RE = re.compile(
+    r"\b(official\s+cmu\s+website|cmu\.edu|google\s+maps?)\b",
+    re.IGNORECASE,
 )
 
 
@@ -112,7 +83,7 @@ def _location_from_text(text: str | None) -> tuple[str, str | None] | None:
     if not isinstance(text, str) or not text.strip():
         return None
     cleaned = _clean_location_phrase(text)
-    lowered = cleaned.lower()
+    lowered = normalize(cleaned)
 
     for alias, loc_id, label in KNOWN_CMU_LOCATIONS:
         if re.search(rf"\b{re.escape(alias)}\b", lowered):
@@ -297,6 +268,20 @@ def _infer_cmu_maps(
     return CmuMaps()
 
 
+def query_has_map_intent(query: str) -> bool:
+    """True when the query alone is enough to place a building or route on the map.
+
+    Used to decide whether to buffer the model's answer before showing it, so a
+    stray "I couldn't look that up" claim never streams to the user ahead of the
+    deterministic map we already know how to build.
+    """
+    if not query or not CMU_MAPS_QUERY_RE.search(query):
+        return False
+    if _direction_locations_from_query(query):
+        return True
+    return _target_location_from_query(query) is not None
+
+
 def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
     """Minimal, route-specific pointer to the map.
 
@@ -321,6 +306,50 @@ def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
     return f"Here's **{target}** on CMU Maps."
 
 
+def _strip_false_map_failure(text: str) -> str:
+    """Drop lines that falsely claim a failed lookup or push an external map.
+
+    Operates line-by-line so Markdown lists and any real directions survive;
+    only the offending prose lines are removed.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and (
+            MAP_FAILURE_CLAIM_RE.search(stripped)
+            or EXTERNAL_MAP_REDIRECT_RE.search(stripped)
+        ):
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+_LOW_VALUE_REMAINDER_RE = re.compile(
+    r"^\s*(?:let me know|feel free|hope (?:this|that) helps|"
+    r"is there anything else|happy to help|anything else)",
+    re.IGNORECASE,
+)
+
+
+def _is_low_value_remainder(text: str) -> bool:
+    """True when what survives scrubbing is empty or just a closing pleasantry."""
+    return len(text.strip()) < 15 or bool(_LOW_VALUE_REMAINDER_RE.match(text))
+
+
+def _repair_false_map_failure(text: str, cmu_maps: CmuMaps) -> str:
+    """Swap a false map-failure claim for the correct map pointer.
+
+    Keeps any genuinely useful directions the model also produced; falls back to
+    just the pointer when nothing of value remains after scrubbing.
+    """
+    success = _cmu_maps_success_text(cmu_maps)
+    scrubbed = _strip_false_map_failure(text)
+    if scrubbed and not _is_low_value_remainder(scrubbed):
+        return f"{success}\n\n{scrubbed}"
+    return success
+
+
 def _apply_cmu_maps_guard(
     parsed: AgentResponse,
     messages: list[dict[str, Any]],
@@ -329,10 +358,13 @@ def _apply_cmu_maps_guard(
     inferred = _infer_cmu_maps(messages, tool_invocations)
     if inferred.url:
         parsed.cmu_maps = inferred
-        # Keep the model's route-specific prose. Only override when it wrongly
-        # claims it couldn't find the place while we do have a map to show.
+        # The deterministic map is authoritative. If the model nonetheless
+        # claims it couldn't look up / retrieve the locations, repair the text
+        # so the user never sees a contradiction with the working map.
         if MAP_FAILURE_CLAIM_RE.search(parsed.response_text or ""):
-            parsed.response_text = _cmu_maps_success_text(inferred)
+            parsed.response_text = _repair_false_map_failure(
+                parsed.response_text or "", inferred
+            )
     elif not _is_valid_cmu_maps_url(parsed.cmu_maps.url):
         parsed.cmu_maps = CmuMaps()
     return parsed

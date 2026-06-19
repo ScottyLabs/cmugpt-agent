@@ -39,7 +39,7 @@ from langgraph.graph.message import add_messages
 from langgraph.types import StreamWriter
 from pydantic import SecretStr
 
-from .cmu_maps import _apply_cmu_maps_guard
+from .cmu_maps import _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
     apply_tool_transparency_guard,
     compute_thought,
@@ -64,6 +64,7 @@ class AgentState(TypedDict):
     tool_invocations: Annotated[list[dict[str, Any]], operator.add]
     services_used: Annotated[list[str], operator.add]
     response_text: str
+    streamed: bool
     response_payload: dict[str, Any]
 
 
@@ -123,8 +124,18 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
         )
         runnable = bound_required if force_tool else bound
 
+        # Buffer (don't live-stream) these passes so postprocess can repair the
+        # text before the user sees it:
+        #   * forced tool passes: prose here (e.g. an "I couldn't find a route"
+        #     preamble) is not the final answer.
+        #   * map queries: the model sometimes falsely claims it couldn't look
+        #     up locations even though we have a working map; we strip that out
+        #     in postprocess, so it must not stream live.
+        suppress_stream = force_tool or query_has_map_intent(query)
+
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
+        streamed_any = False
         async for chunk in runnable.astream(state["messages"]):
             if not isinstance(chunk, AIMessageChunk):
                 continue
@@ -132,8 +143,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
             if chunk.tool_call_chunks:
                 saw_tool_call = True
             text = _message_text(chunk)
-            if text and not saw_tool_call:
+            if text and not saw_tool_call and not suppress_stream:
                 writer({"event": "delta", "data": {"text": text}})
+                streamed_any = True
 
         if gathered is None:
             gathered = AIMessageChunk(content="")
@@ -150,6 +162,7 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
         return {
             "messages": [final_message],
             "response_text": _message_text(gathered),
+            "streamed": streamed_any,
         }
 
     return agent_node
@@ -231,6 +244,12 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
+    # When the answer was buffered (forced tool pass or a map query), it hasn't
+    # been streamed yet — emit the repaired text now so the user only ever sees
+    # the corrected version.
+    if not state.get("streamed") and parsed.response_text:
+        writer({"event": "delta", "data": {"text": parsed.response_text}})
+
     if parsed.cmu_maps.url:
         writer({"event": "map", "data": parsed.cmu_maps.model_dump()})
 
@@ -301,6 +320,7 @@ def _initial_state(
         tool_invocations=[],
         services_used=[],
         response_text="",
+        streamed=False,
         response_payload={},
     )
 
