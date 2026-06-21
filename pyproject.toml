@@ -61,4 +61,5 @@ select = [
 # Entry points that prepend the repo root to sys.path before importing `agent`.
 [tool.ruff.lint.per-file-ignores]
 "src/main.py" = ["E402"]
-"agent/test_agent.py" = ["E402"]
+"tools/live_agent_e2e.py" = ["E402"]
+"tools/live_agent_smoke.py" = ["E402"]
