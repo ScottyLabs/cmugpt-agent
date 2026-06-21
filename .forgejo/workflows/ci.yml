@@ -55,3 +55,6 @@ jobs:
 
       - name: Lint
         run: uv run ruff check
+
+      - name: Test Agent
+        run: uv run python tests/test_agent.py

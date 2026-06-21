@@ -242,8 +242,8 @@ async def _run_streaming_loop(
 
     for _ in range(10):
         inferred_cmu_maps = _infer_cmu_maps(messages, tool_invocations)
-        buffer_model_text = (
-            inferred_cmu_maps.mode == "directions" and bool(inferred_cmu_maps.url)
+        buffer_model_text = inferred_cmu_maps.mode == "directions" and bool(
+            inferred_cmu_maps.url
         )
         if buffer_model_text and not map_sent:
             map_sent = True

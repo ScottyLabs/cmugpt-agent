@@ -289,10 +289,7 @@ def _directions_url(src: str, dest: str) -> str:
     encoded_target = quote(dest, safe="")
     encoded_src = quote(src, safe="")
     encoded_dest = quote(dest, safe="")
-    return (
-        f"{CMU_MAPS_BASE_URL}/{encoded_target}"
-        f"?src={encoded_src}&dst={encoded_dest}"
-    )
+    return f"{CMU_MAPS_BASE_URL}/{encoded_target}?src={encoded_src}&dst={encoded_dest}"
 
 
 def _maps_payload_for_location(
@@ -365,9 +362,8 @@ def _infer_cmu_maps(
         if name not in {"maps_search_buildings", "maps_list_possible_locations"}:
             continue
         args = _tool_arguments(call)
-        target = (
-            _location_from_tool_result(call.get("result"))
-            or _location_from_text(args.get("query"))
+        target = _location_from_tool_result(call.get("result")) or _location_from_text(
+            args.get("query")
         )
         if target:
             return _maps_payload_for_location(target)
@@ -386,9 +382,8 @@ def _apply_cmu_maps_guard(
     inferred = _infer_cmu_maps(messages, tool_invocations)
     if inferred.url:
         parsed.cmu_maps = inferred
-        if (
-            inferred.mode == "directions"
-            or MAP_FAILURE_CLAIM_RE.search(parsed.response_text or "")
+        if inferred.mode == "directions" or MAP_FAILURE_CLAIM_RE.search(
+            parsed.response_text or ""
         ):
             parsed.response_text = _cmu_maps_success_text(inferred)
     elif not _is_valid_cmu_maps_url(parsed.cmu_maps.url):
