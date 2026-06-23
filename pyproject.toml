@@ -6,9 +6,8 @@ license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "flask>=3.1.2",
     "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.22.0",
+    "uvicorn>=0.22.0",
     "httpx>=0.28.1",
     "mcp>=1.0.0",
     "openai>=1.108.0",
@@ -20,8 +19,18 @@ dependencies = [
     "langchain-mcp-adapters>=0.3.0",
 ]
 
+[project.scripts]
+cmugpt-agent = "src.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [dependency-groups]
 dev = ["pre-commit>=4.2.0", "ruff>=0.11.10", "ty>=0.0.1a2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "agent"]
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -56,4 +65,5 @@ select = [
 # Entry points that prepend the repo root to sys.path before importing `agent`.
 [tool.ruff.lint.per-file-ignores]
 "src/main.py" = ["E402"]
-"agent/test_agent.py" = ["E402"]
+"tools/live_agent_e2e.py" = ["E402"]
+"tools/live_agent_smoke.py" = ["E402"]

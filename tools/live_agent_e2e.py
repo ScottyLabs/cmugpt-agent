@@ -7,7 +7,7 @@ Each test asserts:
     * services_used is populated when the query requires data
     * schema fields are sane
 
-Run with: `uv run python agent/tests.py`
+Run with: `uv run python tools/live_agent_e2e.py`
 """
 
 import asyncio

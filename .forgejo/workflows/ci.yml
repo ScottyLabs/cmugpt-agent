@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: docker
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v6
+
+      - name: Install uv
+        uses: https://github.com/astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        uses: https://github.com/actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Check Formatting
+        run: uv run ruff format --check
+
+      - name: Typecheck
+        run: uv run ty check
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Test Agent
+        run: uv run python ci_test/test_agent.py
