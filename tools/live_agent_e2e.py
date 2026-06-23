@@ -18,7 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent.agent_hub import _cmu_maps_success_text, _infer_cmu_maps, run_agent
+from agent import run_agent
+from agent.cmu_maps import _cmu_maps_success_text, _infer_cmu_maps
 from agent.schema import AgentResponse, UserInput
 
 STALL_PHRASES = [
