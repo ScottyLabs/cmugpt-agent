@@ -18,6 +18,8 @@ non-streaming via ``ainvoke`` the writes are simply dropped.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import operator
 import os
 from collections.abc import AsyncIterator
@@ -36,6 +38,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.store.base import BaseStore
 from langgraph.types import StreamWriter
 from pydantic import SecretStr
 
@@ -46,6 +49,14 @@ from .guards import (
     should_require_tool,
 )
 from .mcp_tools import load_mcp_tools
+from .memory import (
+    FORGET_TOOL,
+    MEMORY_TOOL_NAMES,
+    build_memory_tools,
+    ensure_store,
+    learn,
+    recall,
+)
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 
@@ -61,11 +72,18 @@ class AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     query: str
+    user_id: str | None
+    memory_block: str
     tool_invocations: Annotated[list[dict[str, Any]], operator.add]
     services_used: Annotated[list[str], operator.add]
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
+
+
+# Background memory-extraction tasks are fire-and-forget; hold references so the
+# event loop doesn't garbage-collect them before they finish.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def _api_key() -> str:
@@ -114,15 +132,27 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
+    # Forcing a tool is only about CMU *data* lookups; the memory tools must
+    # never be the thing a forced data query is coerced into calling.
+    has_data_tools = any(tool.name not in MEMORY_TOOL_NAMES for tool in tools)
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
         force_tool = (
-            bool(tools)
+            has_data_tools
             and not state["services_used"]
             and should_require_tool(_helper_messages(query))
         )
         runnable = bound_required if force_tool else bound
+
+        # Inject recalled user memory as a second system message, right after the
+        # base system prompt, without persisting it into the message history the
+        # Surface stores.
+        call_messages = state["messages"]
+        memory_block = state.get("memory_block") or ""
+        if memory_block:
+            base, *rest = call_messages
+            call_messages = [base, SystemMessage(content=memory_block), *rest]
 
         # Buffer (don't live-stream) these passes so postprocess can repair the
         # text before the user sees it:
@@ -136,7 +166,7 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
         streamed_any = False
-        async for chunk in runnable.astream(state["messages"]):
+        async for chunk in runnable.astream(call_messages):
             if not isinstance(chunk, AIMessageChunk):
                 continue
             gathered = chunk if gathered is None else gathered + chunk
@@ -192,6 +222,23 @@ def _build_tools_node(tools: list[BaseTool]):
                     result = raw if isinstance(raw, str) else str(raw)
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     result = f"Tool '{name}' failed: {exc}"
+
+            if name in MEMORY_TOOL_NAMES:
+                # Memory tools are internal: their result is our own trusted
+                # confirmation (not untrusted data), they never appear as a
+                # user-facing "service used", and the Surface renders the
+                # `memory` event as a "memory updated" chip.
+                writer(
+                    {
+                        "event": "memory",
+                        "data": {
+                            "op": "remove" if name == FORGET_TOOL else "add",
+                            "text": result,
+                        },
+                    }
+                )
+                new_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+                continue
 
             new_invocations.append({"name": name, "arguments": args, "result": result})
             if name not in state["services_used"] and name not in new_services:
@@ -258,6 +305,48 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     return {"response_payload": payload, "response_text": parsed.response_text}
 
 
+def _build_recall_node(store: BaseStore):
+    """Read path: fetch top-k relevant memory and stage it for the agent node."""
+
+    async def recall_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
+        user_id = state.get("user_id")
+        if not user_id:
+            return {}
+        block = await recall(store, user_id, state["query"])
+        return {"memory_block": block} if block else {}
+
+    return recall_node
+
+
+def _build_learn_node(store: BaseStore):
+    """Write path: distill durable facts after the answer is already delivered.
+
+    Scheduled fire-and-forget so it adds zero latency to the response — the
+    `done` event has already been emitted by ``postprocess`` upstream.
+    """
+
+    async def learn_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
+        user_id = state.get("user_id")
+        response_text = state.get("response_text") or ""
+        if user_id and response_text:
+            task = asyncio.create_task(
+                _safe_learn(store, user_id, state["query"], response_text)
+            )
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
+        return {}
+
+    return learn_node
+
+
+async def _safe_learn(
+    store: BaseStore, user_id: str, query: str, response_text: str
+) -> None:
+    # Memory is best-effort; never let a background failure surface.
+    with contextlib.suppress(Exception):
+        await learn(store, user_id, query, response_text)
+
+
 def _route_after_agent(state: AgentState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and last.tool_calls:
@@ -265,22 +354,34 @@ def _route_after_agent(state: AgentState) -> str:
     return "postprocess"
 
 
-def build_graph(model: ChatOpenAI, tools: list[BaseTool]):
-    """Compile the agent graph for one request (model + tools captured)."""
+def build_graph(
+    model: ChatOpenAI,
+    tools: list[BaseTool],
+    store: BaseStore,
+):
+    """Compile the agent graph for one request (model + tools + store captured).
+
+    Shape: ``START -> recall -> agent`` then either ``-> tools -> agent`` or
+    ``-> postprocess -> learn -> END``.
+    """
     graph = StateGraph(AgentState)
+    graph.add_node("recall", _build_recall_node(store))
     graph.add_node("agent", _build_agent_node(model, tools))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
+    graph.add_node("learn", _build_learn_node(store))
 
-    graph.add_edge(START, "agent")
+    graph.add_edge(START, "recall")
+    graph.add_edge("recall", "agent")
     graph.add_conditional_edges(
         "agent",
         _route_after_agent,
         {"tools": "tools", "postprocess": "postprocess"},
     )
     graph.add_edge("tools", "agent")
-    graph.add_edge("postprocess", END)
-    return graph.compile()
+    graph.add_edge("postprocess", "learn")
+    graph.add_edge("learn", END)
+    return graph.compile(store=store)
 
 
 def _sanitize_history(
@@ -317,12 +418,29 @@ def _initial_state(
     return AgentState(
         messages=messages,
         query=user_input.query,
+        user_id=user_input.user_id,
+        memory_block="",
         tool_invocations=[],
         services_used=[],
         response_text="",
         streamed=False,
         response_payload={},
     )
+
+
+async def _prepare_tools_and_store(
+    user_id: str | None,
+) -> tuple[list[BaseTool], BaseStore]:
+    """Load MCP tools and the memory store, adding per-user memory tools.
+
+    Memory tools are bound to ``user_id`` so the model can never read or write
+    another user's memory; anonymous turns get no memory tools at all.
+    """
+    tools = await load_mcp_tools()
+    store = await ensure_store()
+    if user_id:
+        tools = [*tools, *build_memory_tools(store, user_id)]
+    return tools, store
 
 
 async def run_agent(
@@ -337,8 +455,8 @@ async def run_agent(
             confidence=0.2,
         )
 
-    tools = await load_mcp_tools()
-    graph = build_graph(_make_chat_model(model), tools)
+    tools, store = await _prepare_tools_and_store(user_input.user_id)
+    graph = build_graph(_make_chat_model(model), tools, store)
     final = await graph.ainvoke(_initial_state(user_input, message_history, tools))
 
     payload = final.get("response_payload")
@@ -366,8 +484,8 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    tools = await load_mcp_tools()
-    graph = build_graph(_make_chat_model(model), tools)
+    tools, store = await _prepare_tools_and_store(user_input.user_id)
+    graph = build_graph(_make_chat_model(model), tools, store)
 
     async for chunk in graph.astream(
         _initial_state(user_input, message_history, tools),

@@ -65,7 +65,9 @@ async def fake_run_agent(
 def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert_equal(response.status_code, HTTPStatus.OK, "health status")
-    assert_equal(response.json(), {"status": "ok"}, "health payload")
+    payload = response.json()
+    assert_equal(payload["status"], "ok", "health status field")
+    assert_true("backend" in payload["memory"], "health reports memory backend")
 
 
 def test_agent_respond_accepts_supported_payload_shapes(

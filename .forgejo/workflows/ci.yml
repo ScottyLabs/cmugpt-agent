@@ -37,3 +37,6 @@ jobs:
 
       - name: Test Agent
         run: uv run python ci_test/test_agent.py
+
+      - name: Test Memory
+        run: uv run python ci_test/test_memory.py

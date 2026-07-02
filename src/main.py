@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,32 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import UserInput, run_agent, stream_agent_response
+from agent.memory import (
+    clear_memory,
+    close_store,
+    delete_fact,
+    ensure_store,
+    list_facts,
+    setup_store,
+    store_status,
+)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Initialize the memory store on startup; tear it down on shutdown.
+
+    With ``DATABASE_URL`` set this opens the Postgres connection pool (and runs
+    pgvector setup) once; otherwise it builds the in-memory fallback store.
+    """
+    await setup_store()
+    try:
+        yield
+    finally:
+        await close_store()
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
 # to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
@@ -134,7 +159,12 @@ def _parse_request(
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
+    # `memory.backend` is the one-request prod check: "postgres" means this
+    # deploy got a database + DATABASE_URL; "in-memory" means it fell back.
+    return JSONResponse(
+        content={"status": "ok", "memory": store_status()},
+        status_code=HTTPStatus.OK,
+    )
 
 
 @app.post("/agent/respond", dependencies=[Depends(_require_shared_secret)])
@@ -181,6 +211,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
     Emits:
         event: status data: {"text": "<short progress label>"}
         event: map    data: <CMU Maps payload JSON>
+        event: memory data: {"op": "add"|"remove", "text": "<confirmation>"}
         event: delta  data: {"text": "<chunk of response_text>"}
         event: done   data: <full AgentResponse JSON>
         event: error  data: {"error": "...", "detail": "..."}
@@ -215,6 +246,42 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # disable nginx/proxy buffering
         },
+    )
+
+
+@app.get("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
+async def get_memory(user_id: str) -> JSONResponse:
+    """List a user's durable memory facts (powers a 'Manage memories' UI)."""
+    store = await ensure_store()
+    facts = await list_facts(store, user_id)
+    return JSONResponse(
+        content={"user_id": user_id, "facts": facts},
+        status_code=HTTPStatus.OK,
+    )
+
+
+@app.delete(
+    "/memory/{user_id}/{fact_id}",
+    dependencies=[Depends(_require_shared_secret)],
+)
+async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
+    """Delete a single remembered fact for a user."""
+    store = await ensure_store()
+    await delete_fact(store, user_id, fact_id)
+    return JSONResponse(
+        content={"status": "deleted", "id": fact_id},
+        status_code=HTTPStatus.OK,
+    )
+
+
+@app.delete("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
+async def clear_user_memory(user_id: str) -> JSONResponse:
+    """Delete all of a user's facts and episodes ('forget me')."""
+    store = await ensure_store()
+    removed = await clear_memory(store, user_id)
+    return JSONResponse(
+        content={"status": "cleared", "removed": removed},
+        status_code=HTTPStatus.OK,
     )
 
 
