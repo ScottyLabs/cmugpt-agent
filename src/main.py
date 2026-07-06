@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import secrets
 import sys
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -23,10 +25,21 @@ from agent.memory import (
     close_store,
     delete_fact,
     ensure_store,
+    is_valid_user_id,
     list_facts,
     setup_store,
     store_status,
 )
+
+logger = logging.getLogger(__name__)
+
+# Input caps: these payloads flow straight into LLM calls (token cost) and,
+# for user_id, into per-user database namespaces — so none of them may be
+# caller-controlled without bounds.
+_MAX_QUERY_CHARS = 8_000
+_MAX_USER_ID_CHARS = 128
+_MAX_HISTORY_MESSAGES = 40
+_MAX_HISTORY_MESSAGE_CHARS = 8_000
 
 
 @asynccontextmanager
@@ -36,6 +49,11 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     With ``DATABASE_URL`` set this opens the Postgres connection pool (and runs
     pgvector setup) once; otherwise it builds the in-memory fallback store.
     """
+    if not os.getenv("AGENT_SHARED_SECRET"):
+        logger.warning(
+            "AGENT_SHARED_SECRET is not set: /agent/respond* and /memory/* "
+            "are UNAUTHENTICATED. This is only acceptable in local dev."
+        )
     await setup_store()
     try:
         yield
@@ -57,12 +75,17 @@ def _require_shared_secret(
 ) -> None:
     expected = os.getenv("AGENT_SHARED_SECRET")
     if not expected:
-        return  # auth disabled
-    if (
-        creds is None
-        or creds.scheme.lower() != "bearer"
-        or creds.credentials != expected
-    ):
+        return  # auth disabled (dev only; the lifespan logs a warning)
+    token_ok = (
+        creds is not None
+        and creds.scheme.lower() == "bearer"
+        # Constant-time comparison: `!=` short-circuits on the first differing
+        # byte, which leaks secret prefixes through response timing.
+        and secrets.compare_digest(
+            creds.credentials.encode("utf-8"), expected.encode("utf-8")
+        )
+    )
+    if not token_ok:
         raise HTTPException(
             status_code=HTTPStatus.UNAUTHORIZED,
             detail="Invalid or missing bearer token.",
@@ -89,6 +112,8 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     query = candidate.get("query") or candidate.get("message") or candidate.get("input")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("A non-empty 'query' field is required.")
+    if len(query) > _MAX_QUERY_CHARS:
+        raise ValueError(f"'query' must be at most {_MAX_QUERY_CHARS} characters.")
 
     context = candidate.get("context")
     if context is not None and not isinstance(context, Mapping):
@@ -97,6 +122,14 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     user_id = candidate.get("user_id")
     if user_id is not None and not isinstance(user_id, str):
         raise ValueError("'user_id' must be a string if provided.")
+    # user_id becomes a per-user database namespace matched with an unescaped
+    # SQL LIKE, so it must exclude wildcard/separator characters — not merely be
+    # printable. is_valid_user_id enforces the safe allowlist.
+    if user_id is not None and not is_valid_user_id(user_id):
+        raise ValueError(
+            "'user_id' must match [A-Za-z0-9@:+=~-] and be at most "
+            f"{_MAX_USER_ID_CHARS} characters."
+        )
 
     normalized: dict[str, Any] = {"query": query.strip()}
     if context is not None:
@@ -153,6 +186,16 @@ def _parse_request(
                     "'content' field."
                 ),
             )
+        # History flows verbatim into the LLM call: cap turns and per-message
+        # size so a single request can't carry an unbounded token bill. Trimming
+        # (rather than rejecting) mirrors normal context-window truncation.
+        message_history = [
+            {
+                "role": str(item["role"]),
+                "content": str(item["content"])[:_MAX_HISTORY_MESSAGE_CHARS],
+            }
+            for item in message_history[-_MAX_HISTORY_MESSAGES:]
+        ]
 
     return user_input, model, message_history
 
@@ -186,9 +229,12 @@ async def agent_respond(request: Request) -> JSONResponse:
             message_history=message_history,
         )
     except Exception as exc:
+        # Log the real error server-side; exception text can leak internal
+        # URLs/config, so clients get a generic message.
+        logger.exception("agent execution failed")
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=f"Agent execution failed: {exc}",
+            detail="Agent execution failed.",
         ) from exc
 
     return JSONResponse(
@@ -234,8 +280,11 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
                 message_history=message_history,
             ):
                 yield _sse(event_name, data).encode("utf-8")
-        except Exception as exc:
-            err = f"Agent execution failed: {exc}"
+        except Exception:
+            # Same policy as the non-streaming endpoint: log the real error,
+            # send the client a generic one.
+            logger.exception("agent stream failed")
+            err = "Agent execution failed."
             yield _sse("error", {"error": err, "detail": err}).encode("utf-8")
 
     return StreamingResponse(
@@ -249,9 +298,19 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
     )
 
 
+def _require_valid_user_id(user_id: str) -> None:
+    """Reject path-param user ids that aren't safe as a memory namespace key."""
+    if not is_valid_user_id(user_id):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Invalid 'user_id'.",
+        )
+
+
 @app.get("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
 async def get_memory(user_id: str) -> JSONResponse:
     """List a user's durable memory facts (powers a 'Manage memories' UI)."""
+    _require_valid_user_id(user_id)
     store = await ensure_store()
     facts = await list_facts(store, user_id)
     return JSONResponse(
@@ -266,6 +325,7 @@ async def get_memory(user_id: str) -> JSONResponse:
 )
 async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
     """Delete a single remembered fact for a user."""
+    _require_valid_user_id(user_id)
     store = await ensure_store()
     await delete_fact(store, user_id, fact_id)
     return JSONResponse(
@@ -277,6 +337,7 @@ async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
 @app.delete("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
 async def clear_user_memory(user_id: str) -> JSONResponse:
     """Delete all of a user's facts and episodes ('forget me')."""
+    _require_valid_user_id(user_id)
     store = await ensure_store()
     removed = await clear_memory(store, user_id)
     return JSONResponse(
@@ -286,6 +347,12 @@ async def clear_user_memory(user_id: str) -> JSONResponse:
 
 
 def main() -> None:
+    # Uvicorn only configures its own loggers; configure the root logger so
+    # application logs (agent.*, src.*) actually emit.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     port = int(os.environ.get("PORT", "5000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 

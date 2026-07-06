@@ -5,9 +5,11 @@ non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
 endpoints. The model emits plain Markdown; deterministic nodes compute
 `cmu_maps`, `services_used`, and `thought` into graph state.
 
-Graph shape: ``START -> agent``; from ``agent`` either ``-> tools -> agent``
-(when the model requested tool calls) or ``-> postprocess -> END`` (final
-answer).
+Graph shape: ``START -> recall -> agent``; from ``agent`` either
+``-> tools -> agent`` (when the model requested tool calls) or
+``-> postprocess -> END`` (final answer). ``postprocess`` also schedules the
+background memory-learn task before emitting ``done``, so a client disconnect
+right after the final event cannot cancel it.
 
 Streaming is done with LangGraph's custom stream channel: nodes emit typed
 events through the injected `writer`, and the public entrypoints forward them as
@@ -19,7 +21,7 @@ non-streaming via ``ainvoke`` the writes are simply dropped.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 import operator
 import os
 from collections.abc import AsyncIterator
@@ -61,6 +63,8 @@ from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -300,6 +304,16 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     if parsed.cmu_maps.url:
         writer({"event": "map", "data": parsed.cmu_maps.model_dump()})
 
+    # Schedule the background learn pass BEFORE emitting `done`: streaming
+    # clients often disconnect right after the final event, which cancels the
+    # graph — the task must already exist by then or memories are silently
+    # never learned.
+    user_id = state.get("user_id")
+    if user_id and parsed.response_text:
+        task = asyncio.create_task(_safe_learn(user_id, query, parsed.response_text))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+
     payload = parsed.model_dump()
     writer({"event": "done", "data": payload})
     return {"response_payload": payload, "response_text": parsed.response_text}
@@ -318,33 +332,13 @@ def _build_recall_node(store: BaseStore):
     return recall_node
 
 
-def _build_learn_node(store: BaseStore):
-    """Write path: distill durable facts after the answer is already delivered.
-
-    Scheduled fire-and-forget so it adds zero latency to the response — the
-    `done` event has already been emitted by ``postprocess`` upstream.
-    """
-
-    async def learn_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
-        user_id = state.get("user_id")
-        response_text = state.get("response_text") or ""
-        if user_id and response_text:
-            task = asyncio.create_task(
-                _safe_learn(store, user_id, state["query"], response_text)
-            )
-            _BACKGROUND_TASKS.add(task)
-            task.add_done_callback(_BACKGROUND_TASKS.discard)
-        return {}
-
-    return learn_node
-
-
-async def _safe_learn(
-    store: BaseStore, user_id: str, query: str, response_text: str
-) -> None:
-    # Memory is best-effort; never let a background failure surface.
-    with contextlib.suppress(Exception):
+async def _safe_learn(user_id: str, query: str, response_text: str) -> None:
+    """Background memory-learn pass; best-effort, never surfaces a failure."""
+    try:
+        store = await ensure_store()
         await learn(store, user_id, query, response_text)
+    except Exception:
+        logger.warning("background memory learn failed", exc_info=True)
 
 
 def _route_after_agent(state: AgentState) -> str:
@@ -362,14 +356,13 @@ def build_graph(
     """Compile the agent graph for one request (model + tools + store captured).
 
     Shape: ``START -> recall -> agent`` then either ``-> tools -> agent`` or
-    ``-> postprocess -> learn -> END``.
+    ``-> postprocess -> END``; postprocess schedules the background learn task.
     """
     graph = StateGraph(AgentState)
     graph.add_node("recall", _build_recall_node(store))
     graph.add_node("agent", _build_agent_node(model, tools))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
-    graph.add_node("learn", _build_learn_node(store))
 
     graph.add_edge(START, "recall")
     graph.add_edge("recall", "agent")
@@ -379,8 +372,7 @@ def build_graph(
         {"tools": "tools", "postprocess": "postprocess"},
     )
     graph.add_edge("tools", "agent")
-    graph.add_edge("postprocess", "learn")
-    graph.add_edge("learn", END)
+    graph.add_edge("postprocess", END)
     return graph.compile(store=store)
 
 

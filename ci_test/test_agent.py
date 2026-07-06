@@ -107,6 +107,57 @@ def test_agent_respond_rejects_invalid_payload(client: TestClient) -> None:
     assert_equal(payload["error"], payload["detail"], "legacy error envelope")
 
 
+def test_agent_respond_enforces_input_caps(client: TestClient) -> None:
+    oversized_query = client.post("/agent/respond", json={"query": "x" * 8001})
+    assert_equal(
+        oversized_query.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "oversized query rejected",
+    )
+
+    oversized_user = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "user_id": "u" * 129},
+    )
+    assert_equal(
+        oversized_user.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "oversized user_id rejected",
+    )
+
+    long_history = [{"role": "user", "content": f"msg {i}"} for i in range(45)]
+    trimmed = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "message_history": long_history},
+    )
+    assert_equal(trimmed.status_code, HTTPStatus.OK, "long history accepted")
+    assert_true(
+        "history=40" in trimmed.json()["response_text"],
+        "history trimmed to the cap",
+    )
+
+
+def test_memory_endpoints_reject_wildcard_user_id(client: TestClient) -> None:
+    # A LIKE-wildcard user_id must be rejected at the boundary, not reach the
+    # store (where it would match every user's namespace).
+    body_wildcard = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "user_id": "%"},
+    )
+    assert_equal(
+        body_wildcard.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "wildcard user_id in body rejected",
+    )
+
+    path_wildcard = client.get("/memory/%25")  # %25 decodes to '%'
+    assert_equal(
+        path_wildcard.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "wildcard user_id in path rejected",
+    )
+
+
 def test_agent_respond_enforces_shared_secret(client: TestClient) -> None:
     with temporary_env("AGENT_SHARED_SECRET", "ci-secret"):
         missing_auth = client.post("/agent/respond", json={"query": "Hi"})
@@ -136,6 +187,8 @@ def run() -> None:
         test_health(client)
         test_agent_respond_accepts_supported_payload_shapes(client)
         test_agent_respond_rejects_invalid_payload(client)
+        test_agent_respond_enforces_input_caps(client)
+        test_memory_endpoints_reject_wildcard_user_id(client)
         test_agent_respond_enforces_shared_secret(client)
 
 

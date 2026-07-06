@@ -63,6 +63,10 @@ async def _test_recall_roundtrip_and_isolation() -> None:
     block = await memory.recall(store, "u1", "dining recommendations for tonight")
     assert_true("Vegetarian" in block, "recall surfaces a stored fact")
     assert_true("Memory about this user" in block, "recall has a header")
+    assert_true(
+        'USER_MEMORY trust="untrusted-data"' in block,
+        "facts are wrapped as untrusted data (injection defense)",
+    )
 
     # A different user shares nothing.
     other = await memory.recall(store, "u2", "anything at all")
@@ -118,6 +122,32 @@ async def _test_memory_tools_write_to_namespace() -> None:
     assert_equal(await memory.list_facts(store, "u2"), [], "tools are user-scoped")
 
 
+async def _test_user_id_wildcard_cannot_cross_read() -> None:
+    """A LIKE-wildcard user_id must not read another user's memory."""
+    store = _indexed_store()
+    await memory.add_fact(store, "alice", "Alice is allergic to shellfish")
+    await memory.add_fact(store, "bob", "Bob lives in Morewood")
+
+    # '%' / '_' are SQL LIKE wildcards; the allowlist must reject them so they
+    # never reach the store's (unescaped) LIKE prefix match.
+    assert_true(not memory.is_valid_user_id("%"), "'%' rejected")
+    assert_true(not memory.is_valid_user_id("_"), "'_' rejected")
+    assert_true(not memory.is_valid_user_id("a.b"), "namespace separator rejected")
+    assert_true(not memory.is_valid_user_id(""), "empty rejected")
+    assert_true(not memory.is_valid_user_id("x" * 129), "over-long rejected")
+    assert_true(memory.is_valid_user_id("alice-123"), "normal id accepted")
+
+    # The whole read surface must yield nothing for a wildcard id, not a dump.
+    assert_equal(await memory.recall(store, "%", "anything"), "", "recall blocked")
+    assert_equal(await memory.list_facts(store, "%"), [], "list blocked")
+    forget_msg = await memory.forget(store, "%", "shellfish")
+    assert_true("No matching" in forget_msg, "forget blocked")
+
+    # A wildcard-id write is a no-op (never pollutes a real namespace).
+    assert_true(await memory.add_fact(store, "%", "injected") is None, "write blocked")
+    assert_equal(memory.build_memory_tools(store, "%"), [], "no tools for bad id")
+
+
 async def _test_recall_without_index_degrades() -> None:
     store = InMemoryStore()  # no embeddings — recency fallback
     await memory.add_fact(store, "u1", "Plays club soccer on weekends")
@@ -151,7 +181,9 @@ async def _test_forget_keyword_fallback_without_index() -> None:
 
 async def _test_growth_caps_prune_oldest() -> None:
     original_facts, original_episodes = memory._MAX_FACTS, memory._MAX_EPISODES
+    original_every = memory._CAP_CHECK_EVERY
     memory._MAX_FACTS = memory._MAX_EPISODES = 3
+    memory._CAP_CHECK_EVERY = 1  # cap checks are amortized; force every write
     try:
         store = _indexed_store()
         for i in range(5):
@@ -169,13 +201,16 @@ async def _test_growth_caps_prune_oldest() -> None:
         assert_equal(len(episodes), 3, "episodes capped")
     finally:
         memory._MAX_FACTS, memory._MAX_EPISODES = original_facts, original_episodes
+        memory._CAP_CHECK_EVERY = original_every
 
 
 async def _test_explicit_facts_evicted_last() -> None:
     """At the cap, auto-extracted facts are dropped before explicit saves,
     even when the explicit saves are older."""
     original = memory._MAX_FACTS
+    original_every = memory._CAP_CHECK_EVERY
     memory._MAX_FACTS = 3
+    memory._CAP_CHECK_EVERY = 1
     try:
         store = _indexed_store()
         await memory.add_fact(store, "u1", "Shellfish allergy warning", source="tool")
@@ -203,6 +238,33 @@ async def _test_explicit_facts_evicted_last() -> None:
         )
     finally:
         memory._MAX_FACTS = original
+        memory._CAP_CHECK_EVERY = original_every
+
+
+def _test_learn_rate_limit() -> None:
+    """The learn budget blocks rapid-fire runs and enforces the hourly cap."""
+    user = "rate-limit-user"
+    memory._learn_history.pop(user, None)
+    try:
+        assert_true(memory._learn_allowed(user, now=0.0), "first run allowed")
+        assert_true(
+            not memory._learn_allowed(user, now=1.0),
+            "run inside the minimum interval is blocked",
+        )
+        assert_true(
+            memory._learn_allowed(user, now=30.0),
+            "run after the minimum interval is allowed",
+        )
+
+        allowed = 2  # the two successful runs above
+        now = 30.0
+        for _ in range(200):
+            now += memory._LEARN_MIN_INTERVAL_SECONDS
+            if memory._learn_allowed(user, now=now):
+                allowed += 1
+        assert_equal(allowed, memory._LEARN_MAX_PER_HOUR, "hourly ceiling enforced")
+    finally:
+        memory._learn_history.pop(user, None)
 
 
 def _test_prompt_memory_section() -> None:
@@ -251,6 +313,7 @@ async def _run_async() -> None:
     await _test_dedup_skips_duplicates()
     await _test_forget_removes_best_match()
     await _test_memory_tools_write_to_namespace()
+    await _test_user_id_wildcard_cannot_cross_read()
     await _test_recall_without_index_degrades()
     await _test_clear_memory()
     await _test_forget_keyword_fallback_without_index()
@@ -263,6 +326,7 @@ def run() -> None:
     _test_worth_extracting_gate()
     _test_parse_facts_is_tolerant()
     _test_prompt_memory_section()
+    _test_learn_rate_limit()
 
 
 if __name__ == "__main__":
