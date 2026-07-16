@@ -24,7 +24,9 @@ import asyncio
 import logging
 import operator
 import os
+import re
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
@@ -47,6 +49,7 @@ from pydantic import SecretStr
 from .cmu_maps import _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
     apply_tool_transparency_guard,
+    asks_about_tools,
     compute_thought,
     should_require_tool,
 )
@@ -54,6 +57,7 @@ from .mcp_tools import load_mcp_tools
 from .memory import (
     FORGET_TOOL,
     MEMORY_TOOL_NAMES,
+    REMEMBER_TOOL,
     build_memory_tools,
     ensure_store,
     learn,
@@ -90,16 +94,64 @@ class AgentState(TypedDict):
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
+async def drain_background_tasks(timeout: float = 15.0) -> None:
+    """Finish in-flight memory learning before the database pool closes.
+
+    Graceful deploys should retain the final completed turns. A bounded wait
+    prevents shutdown from hanging indefinitely on an upstream model request.
+    """
+    tasks = list(_BACKGROUND_TASKS)
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    if pending:
+        logger.warning(
+            "cancelling %d background memory task(s) after shutdown timeout",
+            len(pending),
+        )
+        for task in pending:
+            task.cancel()
+    await asyncio.gather(*done, *pending, return_exceptions=True)
+
+
+_MEMORY_TOOL_RE = re.compile(
+    r"\b("
+    r"remember|don['’]?t\s+forget|forget|delete\s+(?:my\s+)?memory|"
+    r"remove\s+(?:that|this|it|my\s+memory)|what\s+do\s+you\s+remember|"
+    r"what\s+do\s+you\s+know\s+about\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_MEMORY_RECALL_RE = re.compile(
+    r"\b("
+    r"my|me|for\s+me|i['’]?m|im|i\s+am|i\s+have|i\s+need|i\s+prefer|"
+    r"i\s+(?:like|love|enjoy|hate|dislike|want|wish|told|said|mentioned)|"
+    r"(?:do|did|can|could|would|should|have|am|was)\s+i|"
+    r"preference|prefer|allerg|diet|vegetarian|vegan|major|minor|class|"
+    r"favorite|favourite|schedule|recommend|suggest|where\s+should|"
+    r"what\s+should|about\s+me|know\s+me|remember\s+(?:about\s+)?me|"
+    r"based\s+on\s+(?:what|anything)\s+you\s+(?:know|remember)|"
+    r"what\s+do\s+you\s+remember|what\s+do\s+you\s+know\s+about\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+
 def _api_key() -> str:
     return os.getenv("OPENROUTER_API_KEY", "")
 
 
-def _make_chat_model(model: str) -> ChatOpenAI:
+@lru_cache(maxsize=16)
+def _make_chat_model_for_key(model: str, api_key: str) -> ChatOpenAI:
     return ChatOpenAI(
         model_name=model,
-        openai_api_key=SecretStr(_api_key()),
+        openai_api_key=SecretStr(api_key),
         openai_api_base=OPENROUTER_BASE_URL,
     )
+
+
+def _make_chat_model(model: str) -> ChatOpenAI:
+    return _make_chat_model_for_key(model, _api_key())
 
 
 def _message_text(message: AnyMessage | AIMessageChunk | None) -> str:
@@ -131,6 +183,24 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
         response_text=text,
         metadata=Metadata(),
     )
+
+
+def _needs_data_tools(query: str) -> bool:
+    """True when this turn should pay the MCP/tool-schema latency cost."""
+    if asks_about_tools(query):
+        return True
+    messages = _helper_messages(query)
+    return should_require_tool(messages)
+
+
+def _needs_memory_tools(query: str) -> bool:
+    """True when the model needs explicit remember/forget tools this turn."""
+    return bool(_MEMORY_TOOL_RE.search(query))
+
+
+def _needs_memory_recall(query: str) -> bool:
+    """True when recalled user memory is likely to change the answer."""
+    return bool(_MEMORY_RECALL_RE.search(query))
 
 
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
@@ -218,12 +288,28 @@ def _build_tools_node(tools: list[BaseTool]):
             args = call.get("args") or {}
             call_id = call.get("id") or f"call_{name}"
             tool = tools_by_name.get(name)
+            memory_id: str | None = None
+            memory_fact: str | None = None
             if tool is None:
                 result = f"Tool '{name}' is not available."
             else:
                 try:
                     raw = await tool.ainvoke(args)
-                    result = raw if isinstance(raw, str) else str(raw)
+                    if name == REMEMBER_TOOL and isinstance(raw, dict):
+                        raw_message = raw.get("message")
+                        raw_memory_id = raw.get("memory_id")
+                        raw_fact = raw.get("fact")
+                        result = (
+                            raw_message
+                            if isinstance(raw_message, str)
+                            else "Memory saved."
+                        )
+                        memory_id = (
+                            raw_memory_id if isinstance(raw_memory_id, str) else None
+                        )
+                        memory_fact = raw_fact if isinstance(raw_fact, str) else None
+                    else:
+                        result = raw if isinstance(raw, str) else str(raw)
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     result = f"Tool '{name}' failed: {exc}"
 
@@ -232,15 +318,16 @@ def _build_tools_node(tools: list[BaseTool]):
                 # confirmation (not untrusted data), they never appear as a
                 # user-facing "service used", and the Surface renders the
                 # `memory` event as a "memory updated" chip.
-                writer(
-                    {
-                        "event": "memory",
-                        "data": {
-                            "op": "remove" if name == FORGET_TOOL else "add",
-                            "text": result,
-                        },
-                    }
-                )
+                event_data: dict[str, Any] = {
+                    "op": "remove" if name == FORGET_TOOL else "add",
+                    "text": result,
+                }
+                if memory_id:
+                    event_data["id"] = memory_id
+                    event_data["kind"] = "remembered"
+                if memory_fact:
+                    event_data["fact"] = memory_fact
+                writer({"event": "memory", "data": event_data})
                 new_messages.append(ToolMessage(content=result, tool_call_id=call_id))
                 continue
 
@@ -351,7 +438,9 @@ def _route_after_agent(state: AgentState) -> str:
 def build_graph(
     model: ChatOpenAI,
     tools: list[BaseTool],
-    store: BaseStore,
+    store: BaseStore | None,
+    *,
+    recall_enabled: bool,
 ):
     """Compile the agent graph for one request (model + tools + store captured).
 
@@ -359,13 +448,17 @@ def build_graph(
     ``-> postprocess -> END``; postprocess schedules the background learn task.
     """
     graph = StateGraph(AgentState)
-    graph.add_node("recall", _build_recall_node(store))
     graph.add_node("agent", _build_agent_node(model, tools))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
 
-    graph.add_edge(START, "recall")
-    graph.add_edge("recall", "agent")
+    if recall_enabled and store is not None:
+        graph.add_node("recall", _build_recall_node(store))
+        graph.add_edge(START, "recall")
+        graph.add_edge("recall", "agent")
+    else:
+        graph.add_edge(START, "agent")
+
     graph.add_conditional_edges(
         "agent",
         _route_after_agent,
@@ -373,7 +466,41 @@ def build_graph(
     )
     graph.add_edge("tools", "agent")
     graph.add_edge("postprocess", END)
+    if store is None:
+        return graph.compile()
     return graph.compile(store=store)
+
+
+@lru_cache(maxsize=16)
+def _build_no_tool_graph(model: str, api_key: str):
+    """Reusable graph for no-tool/no-memory turns.
+
+    This cache saves graph compilation time only. The request state still uses
+    the same canonical system prompt as every other LLM-backed turn.
+    """
+    return build_graph(
+        _make_chat_model_for_key(model, api_key),
+        [],
+        None,
+        recall_enabled=False,
+    )
+
+
+def _graph_for_request(
+    model: str,
+    tools: list[BaseTool],
+    store: BaseStore | None,
+    *,
+    recall_enabled: bool,
+):
+    if not tools and store is None and not recall_enabled:
+        return _build_no_tool_graph(model, _api_key())
+    return build_graph(
+        _make_chat_model(model),
+        tools,
+        store,
+        recall_enabled=recall_enabled,
+    )
 
 
 def _sanitize_history(
@@ -421,18 +548,34 @@ def _initial_state(
 
 
 async def _prepare_tools_and_store(
-    user_id: str | None,
-) -> tuple[list[BaseTool], BaseStore]:
-    """Load MCP tools and the memory store, adding per-user memory tools.
+    user_input: UserInput,
+) -> tuple[list[BaseTool], BaseStore | None, bool]:
+    """Plan the turn and prepare only the tools/store it can actually use.
 
-    Memory tools are bound to ``user_id`` so the model can never read or write
-    another user's memory; anonymous turns get no memory tools at all.
+    The latency-sensitive path is ordinary chat: no campus data lookup, no map,
+    no explicit memory operation, and no useful recalled memory. Those turns
+    avoid MCP discovery, tool schema binding, and Postgres store setup. Every
+    LLM-backed turn still receives the same canonical security policy.
     """
-    tools = await load_mcp_tools()
-    store = await ensure_store()
-    if user_id:
+    query = user_input.query
+    user_id = user_input.user_id
+
+    needs_data_tools = _needs_data_tools(query)
+    needs_memory_tools = bool(user_id) and _needs_memory_tools(query)
+    recall_enabled = bool(user_id) and _needs_memory_recall(query)
+
+    tools: list[BaseTool] = []
+    if needs_data_tools:
+        tools.extend(await load_mcp_tools())
+
+    store: BaseStore | None = None
+    if recall_enabled or needs_memory_tools:
+        store = await ensure_store()
+
+    if user_id and needs_memory_tools and store is not None:
         tools = [*tools, *build_memory_tools(store, user_id)]
-    return tools, store
+
+    return tools, store, recall_enabled
 
 
 async def run_agent(
@@ -447,8 +590,13 @@ async def run_agent(
             confidence=0.2,
         )
 
-    tools, store = await _prepare_tools_and_store(user_input.user_id)
-    graph = build_graph(_make_chat_model(model), tools, store)
+    tools, store, recall_enabled = await _prepare_tools_and_store(user_input)
+    graph = _graph_for_request(
+        model,
+        tools,
+        store,
+        recall_enabled=recall_enabled,
+    )
     final = await graph.ainvoke(_initial_state(user_input, message_history, tools))
 
     payload = final.get("response_payload")
@@ -476,8 +624,13 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    tools, store = await _prepare_tools_and_store(user_input.user_id)
-    graph = build_graph(_make_chat_model(model), tools, store)
+    tools, store, recall_enabled = await _prepare_tools_and_store(user_input)
+    graph = _graph_for_request(
+        model,
+        tools,
+        store,
+        recall_enabled=recall_enabled,
+    )
 
     async for chunk in graph.astream(
         _initial_state(user_input, message_history, tools),

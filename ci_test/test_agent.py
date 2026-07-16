@@ -13,7 +13,10 @@ from typing import Any
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import SystemMessage
 
+from agent import graph as graph_module
+from agent.prompts import build_system_prompt
 from agent.schema import ActionType, AgentResponse, Thought, UserInput
 from src import main as app_module
 
@@ -181,8 +184,103 @@ def test_agent_respond_enforces_shared_secret(client: TestClient) -> None:
     assert_equal(authorized.status_code, HTTPStatus.OK, "authorized status")
 
 
+def test_production_requires_database_and_shared_secret() -> None:
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", None),
+        temporary_env("AGENT_SHARED_SECRET", None),
+    ):
+        try:
+            app_module._validate_runtime_configuration()
+        except RuntimeError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(
+                "production starts without durable authenticated memory"
+            )
+    assert_true("DATABASE_URL" in message, "missing database is reported")
+    assert_true("AGENT_SHARED_SECRET" in message, "missing shared secret is reported")
+
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", "postgresql://example.invalid/cmugpt"),
+        temporary_env("AGENT_SHARED_SECRET", "too-short"),
+    ):
+        try:
+            app_module._validate_runtime_configuration()
+        except RuntimeError as exc:
+            assert_true("at least 32" in str(exc), "short secret is rejected")
+        else:
+            raise AssertionError("production accepts a weak shared secret")
+
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", "postgresql://example.invalid/cmugpt"),
+        temporary_env("AGENT_SHARED_SECRET", "s" * 32),
+    ):
+        app_module._validate_runtime_configuration()
+
+
+def test_latency_planner_keeps_generic_turns_tool_free() -> None:
+    assert_true(
+        not graph_module._needs_data_tools("Reply with exactly one short sentence."),
+        "generic turn skips MCP tools",
+    )
+    assert_true(
+        not graph_module._needs_memory_tools("Reply with exactly one short sentence."),
+        "generic turn skips memory tools",
+    )
+    assert_true(
+        not graph_module._needs_memory_recall("Reply with exactly one short sentence."),
+        "generic turn skips memory recall",
+    )
+
+
+def test_latency_planner_preserves_memory_tools() -> None:
+    assert_true(
+        graph_module._needs_memory_tools("Remember that I am vegetarian."),
+        "explicit remember keeps memory tools",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("Where should I eat on campus?"),
+        "personalized recommendation recalls memory",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("What animal do I like?"),
+        "personal fact question recalls memory",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("What did I tell you earlier?"),
+        "question about an earlier user statement recalls memory",
+    )
+
+
+def test_every_llm_turn_uses_the_canonical_system_prompt() -> None:
+    state = graph_module._initial_state(
+        UserInput(query="Explain recursion briefly.", user_id="ci-user"),
+        None,
+        [],
+    )
+    first = state["messages"][0]
+    assert_true(isinstance(first, SystemMessage), "first message is system policy")
+    assert_equal(
+        first.content,
+        build_system_prompt([]),
+        "no-tool turns use the canonical prompt",
+    )
+    assert_true(
+        "Immutable rules (highest priority)" in str(first.content),
+        "canonical security rules are present",
+    )
+
+
 def run() -> None:
-    with patch.object(app_module, "run_agent", fake_run_agent):
+    # Keep smoke tests independent of a developer's local .env. The dedicated
+    # shared-secret test below sets and verifies authentication explicitly.
+    with (
+        temporary_env("AGENT_SHARED_SECRET", None),
+        patch.object(app_module, "run_agent", fake_run_agent),
+    ):
         client = TestClient(app_module.app)
         test_health(client)
         test_agent_respond_accepts_supported_payload_shapes(client)
@@ -190,6 +288,10 @@ def run() -> None:
         test_agent_respond_enforces_input_caps(client)
         test_memory_endpoints_reject_wildcard_user_id(client)
         test_agent_respond_enforces_shared_secret(client)
+        test_production_requires_database_and_shared_secret()
+        test_latency_planner_keeps_generic_turns_tool_free()
+        test_latency_planner_preserves_memory_tools()
+        test_every_llm_turn_uses_the_canonical_system_prompt()
 
 
 if __name__ == "__main__":

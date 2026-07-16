@@ -28,6 +28,28 @@
       mkCmugptAgent = pkgs:
         let
           python = pkgs.python312;
+          langchainMcpAdapters = python.pkgs.buildPythonPackage {
+            pname = "langchain-mcp-adapters";
+            version = "0.3.0";
+            pyproject = true;
+
+            src = pkgs.fetchurl {
+              url = "https://files.pythonhosted.org/packages/a9/1c/b179d8650d2349a342bc1fd1aab41b34154e79c7fc86fc42bdf0bb110d6f/langchain_mcp_adapters-0.3.0.tar.gz";
+              hash = "sha256-+myUlwFesoB95dDDQaNuHSRFzsuuH0ok6SL8W5Txo2w=";
+            };
+
+            build-system = [ python.pkgs.hatchling ];
+            dependencies = with python.pkgs; [
+              langchain-core
+              mcp
+              typing-extensions
+            ];
+            pythonRelaxDeps = [
+              "langchain-core"
+              "mcp"
+            ];
+            pythonImportsCheck = [ "langchain_mcp_adapters" ];
+          };
         in
         python.pkgs.buildPythonApplication {
           pname = "cmugpt-agent";
@@ -45,7 +67,17 @@
             openai
             pydantic
             python-dotenv
+            langchain-core
+            langchain-openai
+            langgraph
+            langgraph-checkpoint-postgres
+            psycopg
+            langchainMcpAdapters
           ];
+
+          # The uv environment uses psycopg's binary extra for portable local
+          # setup. Nix provides libpq through its psycopg package instead.
+          pythonRemoveDeps = [ "psycopg-binary" ];
 
           # Let the build sandbox check imports natively to prove it works
           pythonImportsCheck = [ "src.main" "agent" ];

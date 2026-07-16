@@ -7,10 +7,10 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import UserInput, run_agent, stream_agent_response
+from agent.graph import drain_background_tasks
 from agent.memory import (
     clear_memory,
     close_store,
@@ -27,8 +28,13 @@ from agent.memory import (
     ensure_store,
     is_valid_user_id,
     list_facts,
+    list_memory_items,
     setup_store,
+    store_is_ready,
     store_status,
+)
+from agent.memory import (
+    delete_memory_item as delete_memory_record,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +46,41 @@ _MAX_QUERY_CHARS = 8_000
 _MAX_USER_ID_CHARS = 128
 _MAX_HISTORY_MESSAGES = 40
 _MAX_HISTORY_MESSAGE_CHARS = 8_000
+_PRODUCTION_ENV_NAMES = ("AGENT_ENV", "APP_ENV", "ENVIRONMENT", "SECRETSPEC_PROFILE")
+_PRODUCTION_ENV_VALUES = {"prod", "production"}
+
+
+def _is_production() -> bool:
+    return any(
+        os.getenv(name, "").strip().lower() in _PRODUCTION_ENV_VALUES
+        for name in _PRODUCTION_ENV_NAMES
+    )
+
+
+def _validate_runtime_configuration() -> None:
+    """Fail closed when a production deployment lacks durability or auth."""
+    if not _is_production():
+        return
+    missing = [
+        name
+        for name in ("DATABASE_URL", "AGENT_SHARED_SECRET")
+        if not os.getenv(name, "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Production configuration is missing required environment "
+            f"variable(s): {', '.join(missing)}. Refusing to start with "
+            "non-durable or unauthenticated user memory."
+        )
+    secret = os.environ["AGENT_SHARED_SECRET"]
+    if secret != secret.strip():
+        raise RuntimeError(
+            "AGENT_SHARED_SECRET cannot have leading or trailing whitespace."
+        )
+    if len(secret) < 32:
+        raise RuntimeError(
+            "AGENT_SHARED_SECRET must be at least 32 characters in production."
+        )
 
 
 @asynccontextmanager
@@ -49,6 +90,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     With ``DATABASE_URL`` set this opens the Postgres connection pool (and runs
     pgvector setup) once; otherwise it builds the in-memory fallback store.
     """
+    _validate_runtime_configuration()
     if not os.getenv("AGENT_SHARED_SECRET"):
         logger.warning(
             "AGENT_SHARED_SECRET is not set: /agent/respond* and /memory/* "
@@ -58,6 +100,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await drain_background_tasks()
         await close_store()
 
 
@@ -204,9 +247,11 @@ def _parse_request(
 async def health() -> JSONResponse:
     # `memory.backend` is the one-request prod check: "postgres" means this
     # deploy got a database + DATABASE_URL; "in-memory" means it fell back.
+    ready = await store_is_ready()
+    memory = {**store_status(), "ready": ready}
     return JSONResponse(
-        content={"status": "ok", "memory": store_status()},
-        status_code=HTTPStatus.OK,
+        content={"status": "ok" if ready else "degraded", "memory": memory},
+        status_code=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
     )
 
 
@@ -308,13 +353,60 @@ def _require_valid_user_id(user_id: str) -> None:
 
 
 @app.get("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
-async def get_memory(user_id: str) -> JSONResponse:
-    """List a user's durable memory facts (powers a 'Manage memories' UI)."""
+async def get_memory(
+    user_id: str,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    kind: Literal["learned", "remembered"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> JSONResponse:
+    """Search a user's learned and explicitly remembered facts."""
     _require_valid_user_id(user_id)
     store = await ensure_store()
+    items, total = await list_memory_items(
+        store,
+        user_id,
+        query=q,
+        memory_type=kind,
+        limit=limit,
+        offset=offset,
+    )
+    # Keep the original facts field for older Surface clients while exposing a
+    # unified item list for the searchable memory manager.
     facts = await list_facts(store, user_id)
     return JSONResponse(
-        content={"user_id": user_id, "facts": facts},
+        content={
+            "user_id": user_id,
+            "facts": facts,
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        },
+        status_code=HTTPStatus.OK,
+    )
+
+
+@app.delete(
+    "/memory/{user_id}/items/{kind}/{item_id}",
+    dependencies=[Depends(_require_shared_secret)],
+)
+async def delete_typed_memory_item(
+    user_id: str,
+    kind: Literal["learned", "remembered"],
+    item_id: str,
+) -> JSONResponse:
+    """Delete one learned or explicitly remembered fact."""
+    _require_valid_user_id(user_id)
+    store = await ensure_store()
+    deleted = await delete_memory_record(store, user_id, kind, item_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="Memory item not found.",
+        )
+    return JSONResponse(
+        content={"status": "deleted", "id": item_id, "type": kind},
         status_code=HTTPStatus.OK,
     )
 
@@ -336,7 +428,7 @@ async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
 
 @app.delete("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
 async def clear_user_memory(user_id: str) -> JSONResponse:
-    """Delete all of a user's facts and episodes ('forget me')."""
+    """Delete all user memory, including any legacy raw-chat snippets."""
     _require_valid_user_id(user_id)
     store = await ensure_store()
     removed = await clear_memory(store, user_id)
