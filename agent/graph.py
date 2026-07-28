@@ -45,7 +45,7 @@ from .guards import (
     compute_thought,
     should_require_tool,
 )
-from .mcp_tools import load_mcp_tools
+from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 
@@ -66,6 +66,10 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
+    # Tool groups the user switched off in the Surface. Their tools are already
+    # gone from the bound tool list; postprocess reads this to keep the
+    # deterministic CMU Maps embed off too.
+    disabled_tools: list[str]
 
 
 def _api_key() -> str:
@@ -111,14 +115,23 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
     )
 
 
-def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
+def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
+        # `tool_choice="required"` stops the model answering CMU data questions
+        # from memory, but it forces *some* call from whatever is left bound. Once
+        # the user has switched a group off, the tool that would have served the
+        # question may be gone, and forcing then picks an unrelated one — a wasted
+        # call that also lands in `services_used` and misreports how the answer
+        # was sourced. So only force while the full toolset is available; the
+        # prompt still tells the model to use what it has and to say when a tool
+        # is off.
         force_tool = (
             bool(tools)
+            and not normalize_disabled_groups(state.get("disabled_tools"))
             and not state["services_used"]
             and should_require_tool(_helper_messages(query))
         )
@@ -130,8 +143,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
         #     preamble) is not the final answer.
         #   * map queries: the model sometimes falsely claims it couldn't look
         #     up locations even though we have a working map; we strip that out
-        #     in postprocess, so it must not stream live.
-        suppress_stream = force_tool or query_has_map_intent(query)
+        #     in postprocess, so it must not stream live. With CMUMaps switched
+        #     off there is no map to contradict, so nothing needs repairing.
+        suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
@@ -239,7 +253,10 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
+    # A switched-off CMUMaps means no map embed either, not just no map tools:
+    # the guard below is what attaches the deterministic map to the answer.
+    if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
+        parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
@@ -265,10 +282,14 @@ def _route_after_agent(state: AgentState) -> str:
     return "postprocess"
 
 
-def build_graph(model: ChatOpenAI, tools: list[BaseTool]):
-    """Compile the agent graph for one request (model + tools captured)."""
+def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = True):
+    """Compile the agent graph for one request (model + tools captured).
+
+    `tools` must already have the user's disabled groups filtered out — the
+    agent node binds exactly this list, so anything missing here is uncallable.
+    """
     graph = StateGraph(AgentState)
-    graph.add_node("agent", _build_agent_node(model, tools))
+    graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
 
@@ -310,8 +331,10 @@ def _initial_state(
     user_input: UserInput,
     message_history: list[dict[str, str]] | None,
     tools: list[BaseTool],
+    disabled_tools: list[str] | None = None,
 ) -> AgentState:
-    messages: list[AnyMessage] = [SystemMessage(content=build_system_prompt(tools))]
+    prompt = build_system_prompt(tools, disabled_tools)
+    messages: list[AnyMessage] = [SystemMessage(content=prompt)]
     messages.extend(_sanitize_history(message_history))
     messages.append(HumanMessage(content=user_input.query))
     return AgentState(
@@ -322,24 +345,41 @@ def _initial_state(
         response_text="",
         streamed=False,
         response_payload={},
+        disabled_tools=list(disabled_tools or []),
     )
+
+
+async def _prepare_run(
+    model: str,
+    disabled_tools: list[str] | None,
+) -> tuple[Any, list[BaseTool]]:
+    """Load tools, drop the user's disabled groups, and compile the graph."""
+    tools = filter_tools(await load_mcp_tools(), disabled_tools)
+    maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
+    return build_graph(_make_chat_model(model), tools, maps_enabled), tools
 
 
 async def run_agent(
     user_input: UserInput,
     model: str = "openai/gpt-4o",
     message_history: list[dict[str, str]] | None = None,
+    disabled_tools: list[str] | None = None,
 ) -> AgentResponse:
-    """Non-streaming entry point. Runs the graph and returns the full response."""
+    """Non-streaming entry point. Runs the graph and returns the full response.
+
+    `disabled_tools` lists the tool groups the user switched off in the Surface
+    (`maps`, `courses`, `eats`, `guide`); those tools are never bound.
+    """
     if not _api_key():
         return _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
         )
 
-    tools = await load_mcp_tools()
-    graph = build_graph(_make_chat_model(model), tools)
-    final = await graph.ainvoke(_initial_state(user_input, message_history, tools))
+    graph, tools = await _prepare_run(model, disabled_tools)
+    final = await graph.ainvoke(
+        _initial_state(user_input, message_history, tools, disabled_tools)
+    )
 
     payload = final.get("response_payload")
     if isinstance(payload, dict) and payload:
@@ -355,6 +395,7 @@ async def stream_agent_response(
     user_input: UserInput,
     model: str,
     message_history: list[dict[str, str]] | None,
+    disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Streaming entry point: yields ('delta', ...) ... ('done', ...) events."""
     if not _api_key():
@@ -366,11 +407,10 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    tools = await load_mcp_tools()
-    graph = build_graph(_make_chat_model(model), tools)
+    graph, tools = await _prepare_run(model, disabled_tools)
 
     async for chunk in graph.astream(
-        _initial_state(user_input, message_history, tools),
+        _initial_state(user_input, message_history, tools, disabled_tools),
         stream_mode="custom",
     ):
         if isinstance(chunk, dict) and "event" in chunk:

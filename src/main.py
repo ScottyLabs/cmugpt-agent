@@ -81,10 +81,27 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
+    """Tool groups the Surface says the user switched off.
+
+    Unknown group ids are dropped by the agent rather than rejected here, so a
+    Surface that gains a new switch before the agent knows about it still works.
+    """
+    raw = payload.get("disabled_tools")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'disabled_tools' must be a list of strings if provided.",
+        )
+    return list(raw)
+
+
 def _parse_request(
     payload: Any,
-) -> tuple[UserInput, str | None, list[dict[str, str]] | None]:
-    """Validate the request body and return (user_input, model, history)."""
+) -> tuple[UserInput, str | None, list[dict[str, str]] | None, list[str]]:
+    """Validate the body and return (user_input, model, history, disabled_tools)."""
     if not isinstance(payload, Mapping):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -129,7 +146,7 @@ def _parse_request(
                 ),
             )
 
-    return user_input, model, message_history
+    return user_input, model, message_history, _parse_disabled_tools(payload)
 
 
 @app.get("/health")
@@ -147,13 +164,14 @@ async def agent_respond(request: Request) -> JSONResponse:
             detail="Request body must be valid JSON object.",
         ) from exc
 
-    user_input, model, message_history = _parse_request(payload)
+    user_input, model, message_history, disabled_tools = _parse_request(payload)
 
     try:
         agent_response = await run_agent(
             user_input=user_input,
             model=model or "openai/gpt-4o",
             message_history=message_history,
+            disabled_tools=disabled_tools,
         )
     except Exception as exc:
         raise HTTPException(
@@ -193,7 +211,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
             detail="Request body must be valid JSON object.",
         ) from exc
 
-    user_input, model, message_history = _parse_request(payload)
+    user_input, model, message_history, disabled_tools = _parse_request(payload)
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
@@ -201,6 +219,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
                 user_input=user_input,
                 model=model or "openai/gpt-4o",
                 message_history=message_history,
+                disabled_tools=disabled_tools,
             ):
                 yield _sse(event_name, data).encode("utf-8")
         except Exception as exc:
