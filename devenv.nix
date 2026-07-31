@@ -31,6 +31,4 @@
   enterShell = ''
     [ -f .env ] || touch .env
   '';
-
-  env.VAULT_ADDR = "https://secrets2.scottylabs.org";
 }
