@@ -10,10 +10,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from dotenv import load_dotenv
-from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 
-from agent.agent_hub import _call_mcp_tool, _get_mcp_tools, run_agent
+from agent import run_agent
+from agent.mcp_tools import load_mcp_tools
 from agent.schema import UserInput
 
 load_dotenv(_REPO_ROOT / ".env")
@@ -42,33 +41,19 @@ async def test_mcp():
     print("=" * 50)
 
     print(f"\nConnecting to MCP server: {MCP_SERVER_URL}")
-    async with (
-        streamable_http_client(MCP_SERVER_URL) as (
-            read_stream,
-            write_stream,
-            _,
-        ),
-        ClientSession(read_stream, write_stream) as session,
-    ):
-        await session.initialize()
-        print("Connected successfully.\n")
+    tools = await load_mcp_tools()
+    print(f"Found {len(tools)} tool(s):")
+    for tool in tools:
+        print(f"  - {tool.name}: {tool.description}")
 
-        # List available tools
-        tools = await _get_mcp_tools(session)
-        print(f"Found {len(tools)} tool(s):")
-        for tool in tools:
-            name = tool["function"]["name"]
-            desc = tool["function"]["description"]
-            print(f"  - {name}: {desc}")
-
-        # Call the first tool with empty args as a smoke test
-        if tools:
-            first_tool = tools[0]["function"]["name"]
-            print(f"\nCalling tool '{first_tool}' with empty args...")
-            result = await _call_mcp_tool(session, first_tool, {})
-            print(f"Result:\n{result[:500]}")
-        else:
-            print("\nNo tools found — skipping tool call test.")
+    # Call the first tool with empty args as a smoke test
+    if tools:
+        first_tool = tools[0]
+        print(f"\nCalling tool '{first_tool.name}' with empty args...")
+        result = await first_tool.ainvoke({})
+        print(f"Result:\n{str(result)[:500]}")
+    else:
+        print("\nNo tools found — skipping tool call test.")
 
     print("\nMCP test complete.")
 

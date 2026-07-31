@@ -16,8 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent import UserInput, run_agent
-from agent.streaming import stream_agent_response
+from agent import UserInput, run_agent, stream_agent_response
 
 app = FastAPI()
 
