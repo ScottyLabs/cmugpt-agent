@@ -13,7 +13,7 @@
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    { nixpkgs, ... }:
     let
       inherit (nixpkgs) lib;
       supportedSystems = [
@@ -25,7 +25,8 @@
       forAllSystems = lib.genAttrs supportedSystems;
       pkgsFor = system: nixpkgs.legacyPackages.${system};
 
-      mkCmugptAgent = pkgs:
+      mkCmugptAgent =
+        pkgs:
         let
           python = pkgs.python312;
         in
@@ -35,7 +36,10 @@
           pyproject = true;
           src = ./.;
 
-          nativeBuildInputs = with python.pkgs; [ hatchling setuptools ];
+          nativeBuildInputs = with python.pkgs; [
+            hatchling
+            setuptools
+          ];
 
           propagatedBuildInputs = with python.pkgs; [
             fastapi
@@ -48,13 +52,16 @@
           ];
 
           # Let the build sandbox check imports natively to prove it works
-          pythonImportsCheck = [ "src.main" "agent" ];
+          pythonImportsCheck = [
+            "src.main"
+            "agent"
+          ];
 
           meta.mainProgram = "cmugpt-agent";
         };
     in
     {
-      overlays.default = final: prev: {
+      overlays.default = final: _prev: {
         cmugptAgent = mkCmugptAgent final;
         agent = final.cmugptAgent;
       };

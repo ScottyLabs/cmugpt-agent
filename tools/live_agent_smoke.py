@@ -53,7 +53,7 @@ async def test_mcp():
         result = await first_tool.ainvoke({})
         print(f"Result:\n{str(result)[:500]}")
     else:
-        print("\nNo tools found — skipping tool call test.")
+        print("\nNo tools found - skipping tool call test.")
 
     print("\nMCP test complete.")
 
