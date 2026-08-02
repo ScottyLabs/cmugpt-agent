@@ -9,8 +9,6 @@ on:
 jobs:
   check:
     uses: ScottyLabs/kennel/.forgejo/workflows/ci.yml@main
-    with:
-      build: false
     secrets: inherit
 
   test-agent:

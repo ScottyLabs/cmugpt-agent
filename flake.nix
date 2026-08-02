@@ -10,10 +10,38 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs = {
+        pyproject-nix.follows = "pyproject-nix";
+        nixpkgs.follows = "nixpkgs";
+      };
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs = {
+        pyproject-nix.follows = "pyproject-nix";
+        uv2nix.follows = "uv2nix";
+        nixpkgs.follows = "nixpkgs";
+      };
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    {
+      nixpkgs,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
       supportedSystems = [
@@ -23,54 +51,41 @@
         "x86_64-darwin"
       ];
       forAllSystems = lib.genAttrs supportedSystems;
-      pkgsFor = system: nixpkgs.legacyPackages.${system};
+
+      # The whole dependency graph (including this project itself) resolved
+      # straight from uv.lock, so it can never drift out of sync the way a
+      # hand-maintained propagatedBuildInputs list did.
+      workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
+
+      overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
+
+      pythonSets = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python312; }).overrideScope (
+          lib.composeManyExtensions [
+            pyproject-build-systems.overlays.wheel
+            overlay
+          ]
+        )
+      );
 
       mkCmugptAgent =
-        pkgs:
+        system:
         let
-          python = pkgs.python312;
+          venv = pythonSets.${system}.mkVirtualEnv "cmugpt-agent-env" workspace.deps.default;
         in
-        python.pkgs.buildPythonApplication {
-          pname = "cmugpt-agent";
-          version = (lib.importTOML ./pyproject.toml).project.version;
-          pyproject = true;
-          src = ./.;
-
-          nativeBuildInputs = with python.pkgs; [
-            hatchling
-            setuptools
-          ];
-
-          propagatedBuildInputs = with python.pkgs; [
-            fastapi
-            uvicorn
-            httpx
-            mcp
-            openai
-            pydantic
-            python-dotenv
-          ];
-
-          # Let the build sandbox check imports natively to prove it works
-          pythonImportsCheck = [
-            "src.main"
-            "agent"
-          ];
-
+        venv.overrideAttrs (_: {
           meta.mainProgram = "cmugpt-agent";
-        };
+        });
     in
     {
-      overlays.default = final: _prev: {
-        cmugptAgent = mkCmugptAgent final;
-        agent = final.cmugptAgent;
-      };
-
       packages = forAllSystems (
         system:
         let
-          pkgs = pkgsFor system;
-          cmugptAgent = mkCmugptAgent pkgs;
+          cmugptAgent = mkCmugptAgent system;
         in
         {
           inherit cmugptAgent;
