@@ -132,7 +132,7 @@ def _parse_request(
     return user_input, model, message_history
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health() -> JSONResponse:
     return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
 

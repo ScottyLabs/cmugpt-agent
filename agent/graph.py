@@ -74,9 +74,9 @@ def _api_key() -> str:
 
 def _make_chat_model(model: str) -> ChatOpenAI:
     return ChatOpenAI(
-        model_name=model,
-        openai_api_key=SecretStr(_api_key()),
-        openai_api_base=OPENROUTER_BASE_URL,
+        model=model,
+        api_key=SecretStr(_api_key()),
+        base_url=OPENROUTER_BASE_URL,
     )
 
 
@@ -245,7 +245,7 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
     # When the answer was buffered (forced tool pass or a map query), it hasn't
-    # been streamed yet — emit the repaired text now so the user only ever sees
+    # been streamed yet - emit the repaired text now so the user only ever sees
     # the corrected version.
     if not state.get("streamed") and parsed.response_text:
         writer({"event": "delta", "data": {"text": parsed.response_text}})
@@ -267,7 +267,11 @@ def _route_after_agent(state: AgentState) -> str:
 
 def build_graph(model: ChatOpenAI, tools: list[BaseTool]):
     """Compile the agent graph for one request (model + tools captured)."""
-    graph = StateGraph(AgentState)
+    # ty doesn't yet structurally match TypedDict's synthesized __required_keys__/
+    # __optional_keys__ against langgraph's StateLike protocol (confirmed still
+    # failing on ty 0.0.65); AgentState is a plain TypedDict, the canonical shape
+    # LangGraph expects here.
+    graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
     graph.add_node("agent", _build_agent_node(model, tools))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
