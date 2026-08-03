@@ -144,7 +144,7 @@ class StubTool(BaseTool):
         return "stub"
 
 
-STUB_TOOLS = [
+STUB_TOOLS: list[BaseTool] = [
     StubTool(name=name)
     for name in (
         "maps_search_buildings",

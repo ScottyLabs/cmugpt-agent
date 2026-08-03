@@ -124,7 +124,7 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         # `tool_choice="required"` stops the model answering CMU data questions
         # from memory, but it forces *some* call from whatever is left bound. Once
         # the user has switched a group off, the tool that would have served the
-        # question may be gone, and forcing then picks an unrelated one — a wasted
+        # question may be gone, and forcing then picks an unrelated one: a wasted
         # call that also lands in `services_used` and misreports how the answer
         # was sourced. So only force while the full toolset is available; the
         # prompt still tells the model to use what it has and to say when a tool
@@ -285,7 +285,7 @@ def _route_after_agent(state: AgentState) -> str:
 def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = True):
     """Compile the agent graph for one request (model + tools captured).
 
-    `tools` must already have the user's disabled groups filtered out — the
+    `tools` must already have the user's disabled groups filtered out: the
     agent node binds exactly this list, so anything missing here is uncallable.
     """
     # ty doesn't yet structurally match TypedDict's synthesized __required_keys__/

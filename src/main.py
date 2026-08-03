@@ -90,12 +90,18 @@ def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
     raw = payload.get("disabled_tools")
     if raw is None:
         return []
-    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+    if not isinstance(raw, list):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="'disabled_tools' must be a list of strings if provided.",
         )
-    return list(raw)
+    items = [item for item in raw if isinstance(item, str)]
+    if len(items) != len(raw):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'disabled_tools' must be a list of strings if provided.",
+        )
+    return items
 
 
 def _parse_request(

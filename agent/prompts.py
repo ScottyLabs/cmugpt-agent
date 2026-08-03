@@ -42,7 +42,7 @@ def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
             "The user has switched CMUMaps OFF, so you have no building lookup, "
             "no routing, and NO map is attached to your answer. Do NOT invent "
             "step-by-step turns, distances, or times, and do NOT tell the user "
-            "to look at a map below — there is none. Say plainly that campus "
+            "to look at a map below - there is none. Say plainly that campus "
             "maps are turned off and they can switch CMUMaps back on in "
             "Settings. You may add one or two sentences of general orientation "
             "from confident general knowledge, marked as approximate.\n"
@@ -88,7 +88,7 @@ def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
         "They are unavailable to you this turn. If answering would need one, say "
         "plainly that the tool is switched off and that they can turn it back on "
         "in Settings. Do NOT guess at the data it would have returned, and do "
-        "NOT claim a lookup failed or errored — nothing was attempted.\n"
+        "NOT claim a lookup failed or errored - nothing was attempted.\n"
         "\n"
     )
 
