@@ -63,7 +63,7 @@ async def fake_run_agent(
 
 
 def test_health(client: TestClient) -> None:
-    response = client.get("/health")
+    response = client.get("/api/health")
     assert_equal(response.status_code, HTTPStatus.OK, "health status")
     assert_equal(response.json(), {"status": "ok"}, "health payload")
 

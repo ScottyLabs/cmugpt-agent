@@ -23,7 +23,7 @@
     env.PORT = "5000";
     ready.http.get = {
       port = 5000;
-      path = "/health";
+      path = "/api/health";
     };
   };
 
