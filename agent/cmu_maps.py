@@ -37,9 +37,9 @@ PAREN_LOCATION_RE = re.compile(
 
 MAP_FAILURE_CLAIM_RE = re.compile(
     r"\b("
-    r"wasn['’]?t\s+able|was\s+not\s+able|couldn['’]?t|could\s+not|"
-    r"cannot|can['’]?t|unable|failed|fail|error|issue|problem|trouble|"
-    r"didn['’]?t\s+find|did\s+not\s+find"
+    r"wasn['\u2019]?t\s+able|was\s+not\s+able|couldn['\u2019]?t|could\s+not|"
+    r"cannot|can['\u2019]?t|unable|failed|fail|error|issue|problem|trouble|"
+    r"didn['\u2019]?t\s+find|did\s+not\s+find"
     r")\b.{0,200}?\b("
     r"look(?:ing|ed)?\s*up|retriev\w*|find(?:ing)?|locat(?:e|ing|ions?)|"
     r"data|directions?|route|path|building"
