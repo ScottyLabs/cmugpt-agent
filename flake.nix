@@ -75,11 +75,13 @@
       mkCmugptAgent =
         system:
         let
+          pkgs = nixpkgs.legacyPackages.${system};
           venv = pythonSets.${system}.mkVirtualEnv "cmugpt-agent-env" workspace.deps.default;
         in
-        venv.overrideAttrs (_: {
-          meta.mainProgram = "cmugpt-agent";
-        });
+        pkgs.runCommand "cmugpt-agent" { meta.mainProgram = "cmugpt-agent"; } ''
+          mkdir -p $out/bin
+          ln -s ${venv}/bin/cmugpt-agent $out/bin/cmugpt-agent
+        '';
     in
     {
       packages = forAllSystems (
