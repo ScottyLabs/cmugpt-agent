@@ -16,4 +16,4 @@ inputs:
 
 secretspec:
   enable: true
-  profile: dev
+  profile: prod
