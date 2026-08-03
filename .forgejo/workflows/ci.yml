@@ -7,33 +7,22 @@ on:
     branches: [main]
 
 jobs:
-  checks:
+  check:
+    uses: ScottyLabs/kennel/.forgejo/workflows/ci.yml@main
+    secrets: inherit
+
+  test-agent:
+    needs: check
     runs-on: docker
+    env:
+      SECRETSPEC_PROFILE: ci
+      SECRETSPEC_PROVIDER: env
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
-      - name: Checkout
-        uses: https://code.forgejo.org/actions/checkout@v6
-
-      - name: Install uv
-        uses: https://github.com/astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Install Python
-        uses: https://github.com/actions/setup-python@v5
-        with:
-          python-version-file: "pyproject.toml"
-
-      - name: Install dependencies
-        run: uv sync --locked --all-extras --dev
-
-      - name: Check Formatting
-        run: uv run ruff format --check
-
-      - name: Typecheck
-        run: uv run ty check
-
-      - name: Lint
-        run: uv run ruff check
+      - uses: https://code.forgejo.org/actions/checkout@v7
+      - uses: https://codeberg.org/ScottyLabs/kennel/.forgejo/actions/prepare@main
 
       - name: Test Agent
-        run: uv run python ci_test/test_agent.py
+        run: devenv shell -- uv run python ci_test/test_agent.py

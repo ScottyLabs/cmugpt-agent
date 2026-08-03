@@ -1,6 +1,6 @@
 inputs:
   scottylabs:
-    url: git+https://codeberg.org/ScottyLabs/devenv
+    url: git+https://codeberg.org/ScottyLabs/kennel
   rust-overlay:
     url: github:oxalica/rust-overlay
     inputs:
@@ -16,5 +16,4 @@ inputs:
 
 secretspec:
   enable: true
-  provider: vault://secrets2.scottylabs.org/secret
-  profile: dev
+  profile: prod
