@@ -331,7 +331,7 @@ def _initial_state(
 
 async def run_agent(
     user_input: UserInput,
-    model: str = "openai/gpt-4o",
+    model: str = "openai/gpt-5.4-mini",
     message_history: list[dict[str, str]] | None = None,
 ) -> AgentResponse:
     """Non-streaming entry point. Runs the graph and returns the full response."""
