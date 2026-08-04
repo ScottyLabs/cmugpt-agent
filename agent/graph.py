@@ -365,7 +365,7 @@ async def _prepare_run(
 
 async def run_agent(
     user_input: UserInput,
-    model: str = "openai/gpt-4o",
+    model: str = "openai/gpt-5.4-mini",
     message_history: list[dict[str, str]] | None = None,
     disabled_tools: list[str] | None = None,
 ) -> AgentResponse:

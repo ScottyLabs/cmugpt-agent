@@ -175,7 +175,7 @@ async def agent_respond(request: Request) -> JSONResponse:
     try:
         agent_response = await run_agent(
             user_input=user_input,
-            model=model or "openai/gpt-4o",
+            model=model or "openai/gpt-5.4-mini",
             message_history=message_history,
             disabled_tools=disabled_tools,
         )
@@ -223,7 +223,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         try:
             async for event_name, data in stream_agent_response(
                 user_input=user_input,
-                model=model or "openai/gpt-4o",
+                model=model or "openai/gpt-5.4-mini",
                 message_history=message_history,
                 disabled_tools=disabled_tools,
             ):
