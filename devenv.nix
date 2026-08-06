@@ -6,11 +6,9 @@
     enable = true;
     project.name = "cmugpt-agent";
     secrets.enable = true;
-    # Durable user memory (agent/memory.py) is backed by Postgres + pgvector.
-    # Enabling this boots postgresql_18 in devenv, creates the `cmugpt-agent`
-    # database, and auto-exports DATABASE_URL (a unix-socket conn string) into
-    # the shell - the agent picks that up and langgraph runs `CREATE EXTENSION
-    # vector` on setup. We add pgvector to the module's default extensions.
+    # Local Postgres + pgvector for durable user memory. devenv creates the
+    # database and exports DATABASE_URL into the shell. The agent runs
+    # CREATE EXTENSION vector on setup.
     postgres = {
       enable = true;
       extensions = e: [

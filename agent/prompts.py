@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from langchain_core.tools import BaseTool
 
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups
-from .memory import MEMORY_TOOL_NAMES
+from .memory import is_internal_memory_tool
 
 # Substrings that mark a tool as capable of returning a route/path between two
 # points (as opposed to merely locating a single building). Matched against tool
@@ -28,16 +28,14 @@ def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
 
 
 def _has_memory_tools(tools: list[BaseTool] | None) -> bool:
-    return any((tool.name or "") in MEMORY_TOOL_NAMES for tool in (tools or []))
+    return any(is_internal_memory_tool(tool) for tool in (tools or []))
 
 
 def _memory_section(has_memory_tools: bool) -> str:
-    """Memory guidance, present only when the turn has a signed-in user.
+    """Memory guidance, present only when the memory tools are bound.
 
-    Without this section the model only sees the bare `remember`/`forget` tool
-    descriptions and tends to either never save anything or hoard trivia; these
-    rules define what belongs in long-term memory and how recalled context may
-    be used.
+    Defines what belongs in long-term memory. Without it the model either
+    never saves or hoards trivia.
     """
     if not has_memory_tools:
         return ""
@@ -142,7 +140,7 @@ def build_system_prompt(
 ) -> str:
     """Compose the system prompt, injecting any discovered MCP tools.
 
-    `tools` is expected to be already filtered (see `mcp_tools.filter_tools`);
+    `tools` is expected to be already filtered (see `mcp_tools.filter_tools`).
     `disabled_tools` is what was filtered out, used only for the explanatory
     section above.
     """

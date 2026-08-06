@@ -2,10 +2,10 @@
 
 A single compiled `StateGraph` is the one source of truth for both the
 non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
-endpoints. The model emits plain Markdown; deterministic nodes compute
+endpoints. The model emits plain Markdown. Deterministic nodes compute
 `cmu_maps`, `services_used`, and `thought` into graph state.
 
-Graph shape: ``START -> recall -> agent``; from ``agent`` either
+Graph shape: ``START -> recall -> agent``. From ``agent`` either
 ``-> tools -> agent`` (when the model requested tool calls) or
 ``-> postprocess -> END`` (final answer). ``postprocess`` also schedules the
 background memory-learn task before emitting ``done``, so a client disconnect
@@ -56,10 +56,10 @@ from .guards import (
 from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
 from .memory import (
     FORGET_TOOL,
-    MEMORY_TOOL_NAMES,
     REMEMBER_TOOL,
     build_memory_tools,
     ensure_store,
+    is_internal_memory_tool,
     learn,
     recall,
 )
@@ -87,13 +87,12 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
-    # Tool groups the user switched off in the Surface. Their tools are already
-    # gone from the bound tool list; postprocess reads this to keep the
-    # deterministic CMU Maps embed off too.
+    # Tool groups the user switched off. Their tools are already unbound.
+    # Postprocess reads this to suppress the CMU Maps embed too.
     disabled_tools: list[str]
 
 
-# Background memory-extraction tasks are fire-and-forget; hold references so the
+# Background memory-extraction tasks are fire-and-forget. Hold references so the
 # event loop doesn't garbage-collect them before they finish.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -101,8 +100,7 @@ _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 async def drain_background_tasks(timeout: float = 15.0) -> None:
     """Finish in-flight memory learning before the database pool closes.
 
-    Graceful deploys should retain the final completed turns. A bounded wait
-    prevents shutdown from hanging indefinitely on an upstream model request.
+    Bounded wait so shutdown cannot hang on a stuck model request.
     """
     tasks = list(_BACKGROUND_TASKS)
     if not tasks:
@@ -211,20 +209,16 @@ def _needs_memory_recall(query: str) -> bool:
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
-    # Forcing a tool is only about CMU *data* lookups; the memory tools must
-    # never be the thing a forced data query is coerced into calling.
-    has_data_tools = any(tool.name not in MEMORY_TOOL_NAMES for tool in tools)
+    # Forcing a tool is only about CMU data lookups. Memory tools never count.
+    # Identity comes from build_memory_tools' metadata marker, not the name,
+    # so an MCP tool named "remember" still counts as data.
+    has_data_tools = any(not is_internal_memory_tool(tool) for tool in tools)
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
-        # `tool_choice="required"` stops the model answering CMU data questions
-        # from memory, but it forces *some* call from whatever is left bound. Once
-        # the user has switched a group off, the tool that would have served the
-        # question may be gone, and forcing then picks an unrelated one: a wasted
-        # call that also lands in `services_used` and misreports how the answer
-        # was sourced. So only force while the full toolset is available; the
-        # prompt still tells the model to use what it has and to say when a tool
-        # is off.
+        # Force a tool call only while the full toolset is bound: with a group
+        # switched off, `tool_choice="required"` could coerce an unrelated
+        # tool, wasting a call and misreporting how the answer was sourced.
         force_tool = (
             has_data_tools
             and not normalize_disabled_groups(state.get("disabled_tools"))
@@ -233,23 +227,18 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         )
         runnable = bound_required if force_tool else bound
 
-        # Inject recalled user memory as a second system message, right after the
-        # base system prompt, without persisting it into the message history the
-        # Surface stores.
+        # Inject recalled memory as a second system message. It is never
+        # persisted into the Surface's message history.
         call_messages = state["messages"]
         memory_block = state.get("memory_block") or ""
         if memory_block:
             base, *rest = call_messages
             call_messages = [base, SystemMessage(content=memory_block), *rest]
 
-        # Buffer (don't live-stream) these passes so postprocess can repair the
-        # text before the user sees it:
-        #   * forced tool passes: prose here (e.g. an "I couldn't find a route"
-        #     preamble) is not the final answer.
-        #   * map queries: the model sometimes falsely claims it couldn't look
-        #     up locations even though we have a working map; we strip that out
-        #     in postprocess, so it must not stream live. With CMUMaps switched
-        #     off there is no map to contradict, so nothing needs repairing.
+        # Buffer (don't live-stream) passes whose text postprocess may repair:
+        # forced tool passes (preamble prose is not the final answer) and map
+        # queries (false "couldn't look up" claims get stripped). With CMUMaps
+        # off there is no map to contradict, so map queries stream normally.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
@@ -289,6 +278,11 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
 def _build_tools_node(tools: list[BaseTool]):
     tools_by_name = {tool.name: tool for tool in tools}
+    # Tools this request built via build_memory_tools. Only these are trusted.
+    # An MCP tool merely named "remember" stays untrusted below.
+    internal_memory_names = {
+        tool.name for tool in tools if is_internal_memory_tool(tool)
+    }
 
     async def tools_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         last = state["messages"][-1]
@@ -305,12 +299,18 @@ def _build_tools_node(tools: list[BaseTool]):
             tool = tools_by_name.get(name)
             memory_id: str | None = None
             memory_fact: str | None = None
+            is_memory_tool = name in internal_memory_names
+            memory_op_failed = False
             if tool is None:
                 result = f"Tool '{name}' is not available."
             else:
                 try:
                     raw = await tool.ainvoke(args)
-                    if name == REMEMBER_TOOL and isinstance(raw, dict):
+                    if (
+                        is_memory_tool
+                        and name == REMEMBER_TOOL
+                        and isinstance(raw, dict)
+                    ):
                         raw_message = raw.get("message")
                         raw_memory_id = raw.get("memory_id")
                         raw_fact = raw.get("fact")
@@ -326,23 +326,34 @@ def _build_tools_node(tools: list[BaseTool]):
                     else:
                         result = raw if isinstance(raw, str) else str(raw)
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
-                    result = f"Tool '{name}' failed: {exc}"
+                    if is_memory_tool:
+                        # Raw exception text can leak DSN fragments. Log it,
+                        # send a generic message onward.
+                        logger.warning("memory tool %s failed", name, exc_info=True)
+                        result = "The memory operation failed; nothing was changed."
+                        memory_op_failed = True
+                    else:
+                        result = f"Tool '{name}' failed: {exc}"
 
-            if name in MEMORY_TOOL_NAMES:
-                # Memory tools are internal: their result is our own trusted
-                # confirmation (not untrusted data), they never appear as a
-                # user-facing "service used", and the Surface renders the
-                # `memory` event as a "memory updated" chip.
-                event_data: dict[str, Any] = {
-                    "op": "remove" if name == FORGET_TOOL else "add",
-                    "text": result,
-                }
-                if memory_id:
-                    event_data["id"] = memory_id
-                    event_data["kind"] = "remembered"
-                if memory_fact:
-                    event_data["fact"] = memory_fact
-                writer({"event": "memory", "data": event_data})
+            if is_memory_tool:
+                # Internal tools: results are our own trusted confirmations,
+                # never listed as user-facing services. The Surface renders
+                # the `memory` event as a chip.
+                # Chip only when stored memory actually changed.
+                no_op_forget = name == FORGET_TOOL and result.startswith(
+                    "No matching memory"
+                )
+                if not memory_op_failed and not no_op_forget:
+                    event_data: dict[str, Any] = {
+                        "op": "remove" if name == FORGET_TOOL else "add",
+                        "text": result,
+                    }
+                    if memory_id:
+                        event_data["id"] = memory_id
+                        event_data["kind"] = "remembered"
+                    if memory_fact:
+                        event_data["fact"] = memory_fact
+                    writer({"event": "memory", "data": event_data})
                 new_messages.append(ToolMessage(content=result, tool_call_id=call_id))
                 continue
 
@@ -400,19 +411,16 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
-    # When the answer was buffered (forced tool pass or a map query), it hasn't
-    # been streamed yet - emit the repaired text now so the user only ever sees
-    # the corrected version.
+    # Buffered answers were never streamed. Emit the repaired text now.
     if not state.get("streamed") and parsed.response_text:
         writer({"event": "delta", "data": {"text": parsed.response_text}})
 
     if parsed.cmu_maps.url:
         writer({"event": "map", "data": parsed.cmu_maps.model_dump()})
 
-    # Schedule the background learn pass BEFORE emitting `done`: streaming
-    # clients often disconnect right after the final event, which cancels the
-    # graph - the task must already exist by then or memories are silently
-    # never learned.
+    # Schedule the learn task BEFORE emitting `done`: clients often disconnect
+    # right after the final event, which cancels the graph, and the task must
+    # already exist by then or memories are silently never learned.
     user_id = state.get("user_id")
     if user_id and parsed.response_text:
         task = asyncio.create_task(_safe_learn(user_id, query, parsed.response_text))
@@ -438,7 +446,7 @@ def _build_recall_node(store: BaseStore):
 
 
 async def _safe_learn(user_id: str, query: str, response_text: str) -> None:
-    """Background memory-learn pass; best-effort, never surfaces a failure."""
+    """Background memory-learn pass. Best-effort, never surfaces a failure."""
     try:
         store = await ensure_store()
         await learn(store, user_id, query, response_text)
@@ -464,13 +472,13 @@ def build_graph(
     """Compile the agent graph for one request (model + tools + store captured).
 
     Shape: ``START -> recall -> agent`` then either ``-> tools -> agent`` or
-    ``-> postprocess -> END``; postprocess schedules the background learn task.
+    ``-> postprocess -> END``. Postprocess schedules the background learn task.
     `tools` must already have the user's disabled groups filtered out: the
     agent node binds exactly this list, so anything missing here is uncallable.
     """
     # ty doesn't yet structurally match TypedDict's synthesized __required_keys__/
     # __optional_keys__ against langgraph's StateLike protocol (confirmed still
-    # failing on ty 0.0.65); AgentState is a plain TypedDict, the canonical shape
+    # failing on ty 0.0.65). AgentState is a plain TypedDict, the canonical shape
     # LangGraph expects here.
     graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
     graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
@@ -498,11 +506,7 @@ def build_graph(
 
 @lru_cache(maxsize=16)
 def _build_no_tool_graph(model: str, api_key: str, maps_enabled: bool):
-    """Reusable graph for no-tool/no-memory turns.
-
-    This cache saves graph compilation time only. The request state still uses
-    the same canonical system prompt as every other LLM-backed turn.
-    """
+    """Cached graph for no-tool/no-memory turns. Saves compilation time only."""
     return build_graph(
         _make_chat_model_for_key(model, api_key),
         [],
@@ -536,7 +540,7 @@ def _sanitize_history(
 ) -> list[AnyMessage]:
     """Convert caller history to LangChain messages, dropping non user/assistant.
 
-    We own the system prompt; smuggled `system`/`tool` turns are an injection
+    We own the system prompt. Smuggled `system`/`tool` turns are an injection
     vector, so only `user` and `assistant` turns are carried over.
     """
     if not message_history:
@@ -584,13 +588,10 @@ async def _prepare_tools_and_store(
 ) -> tuple[list[BaseTool], BaseStore | None, bool, bool]:
     """Plan the turn and prepare only the tools/store it can actually use.
 
-    The latency-sensitive path is ordinary chat: no campus data lookup, no map,
-    no explicit memory operation, and no useful recalled memory. Those turns
-    avoid MCP discovery, tool schema binding, and Postgres store setup. Every
-    LLM-backed turn still receives the same canonical security policy.
-    User-disabled tool groups are dropped before the model ever sees them, and
-    the memory tools are appended after filtering so a toggle can never remove
-    them.
+    Ordinary chat skips MCP discovery, schema binding, and store setup for
+    latency. Every turn still gets the canonical security policy. Disabled
+    tool groups are filtered out first. Memory tools are appended after, so a
+    toggle can never remove them.
     """
     query = user_input.query
     user_id = user_input.user_id
@@ -623,7 +624,7 @@ async def run_agent(
     """Non-streaming entry point. Runs the graph and returns the full response.
 
     `disabled_tools` lists the tool groups the user switched off in the Surface
-    (`maps`, `courses`, `eats`, `guide`); those tools are never bound.
+    (`maps`, `courses`, `eats`, `guide`). Those tools are never bound.
     """
     if not _api_key():
         return _fallback_response(

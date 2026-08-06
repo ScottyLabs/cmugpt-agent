@@ -1,25 +1,16 @@
 """Persistent, per-user memory across chats.
 
-This module owns everything stateful about user memory so the rest of the agent
-keeps its mostly-stateless shape. It provides:
+Owns the process-wide LangGraph store singleton (``AsyncPostgresStore`` with
+pgvector when ``DATABASE_URL`` is set, otherwise an ``InMemoryStore`` for dev
+and CI), the :func:`recall` read path, and the write paths: the model-callable
+``remember``/``forget`` tools and the background :func:`learn` extraction pass.
 
-* a process-wide LangGraph ``BaseStore`` singleton - ``AsyncPostgresStore`` with
-  pgvector when ``DATABASE_URL`` is set (durable, vector search), otherwise an
-  ``InMemoryStore`` so local dev and CI run with no database;
-* the read path - :func:`recall` - semantic top-k retrieval of durable facts,
-  formatted into a compact prompt block;
-* the write paths - model-driven :func:`build_memory_tools` (``remember`` /
-  ``forget``) and a background :func:`learn` pass that distills durable facts.
+Facts live under the namespace ``(user_id, "facts")``. Raw chat turns are never
+stored. Anonymous turns (no ``user_id``) run with memory disabled. The legacy
+``episodes`` namespace exists only so old deployments' data can be cleared.
 
-Memory is namespaced per ``user_id`` under ``(user_id, "facts")``. Raw chat
-turns are not written to or recalled from long-term memory. The legacy
-``episodes`` namespace is retained only so a user can clear snippets written by
-older versions. When no ``user_id`` is supplied (anonymous), callers disable
-memory entirely.
-
-Embeddings come from real OpenAI (``OPENAI_API_KEY``); OpenRouter - used for
-chat completion elsewhere - has no embeddings API. When the key is absent the
-store still works, but recall degrades from semantic search to recency listing.
+Embeddings require ``OPENAI_API_KEY`` (OpenRouter has no embeddings API).
+Without it recall degrades from semantic search to a recency listing.
 """
 
 from __future__ import annotations
@@ -46,24 +37,30 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Tool names the model can call to manage its own memory. The graph's tools node
-# special-cases these: their results are trusted confirmations (not wrapped as
-# untrusted data) and they never count as user-facing MCP "services used".
+# Names of the model-callable memory tools. Trust is decided by the metadata
+# marker below, never by name.
 REMEMBER_TOOL = "remember"
 FORGET_TOOL = "forget"
 MEMORY_TOOL_NAMES: frozenset[str] = frozenset({REMEMBER_TOOL, FORGET_TOOL})
 
+# BaseTool.metadata marker set by build_memory_tools. The graph trusts only
+# tools carrying it: an MCP server could publish its own "remember" tool, and
+# that one must stay untrusted.
+INTERNAL_MEMORY_METADATA = "cmugpt_internal_memory"
+
+
+def is_internal_memory_tool(tool: BaseTool) -> bool:
+    """True only for the trusted per-user memory tools built in this module."""
+    return bool((tool.metadata or {}).get(INTERNAL_MEMORY_METADATA))
+
+
 _FACTS = "facts"
 _EPISODES = "episodes"  # legacy cleanup only; new raw chat turns are never stored
 
-# A user_id is used as the Postgres store's namespace key, which langgraph
-# matches with an *unescaped* SQL ``LIKE '<user_id>.facts%'``. Without this
-# allowlist, a user_id of ``%`` (or ``_``) would be a LIKE wildcard that matches
-# every other user's namespace - a cross-tenant read of all stored memory. The
-# allowlist forbids the wildcards ``%``/``_`` and the namespace separator ``.``
-# (which langgraph rejects in labels anyway), leaving only characters safe as a
-# literal LIKE prefix. Applied at every entry so the store is never queried or
-# written with an unsafe key, regardless of caller.
+# The user_id becomes the store's namespace key, which langgraph matches with
+# an unescaped SQL LIKE prefix. This allowlist excludes the LIKE wildcards
+# ("%", "_") and the namespace separator ".", so a hostile user_id can never
+# match another user's namespace. Checked at every entry point.
 _USER_ID_RE = re.compile(r"^[A-Za-z0-9@:+=~-]{1,128}$")
 
 
@@ -72,39 +69,33 @@ def is_valid_user_id(user_id: str | None) -> bool:
     return bool(user_id) and bool(_USER_ID_RE.match(user_id))
 
 
-# How many items to inject per turn (token-efficient: only the most relevant).
+# Facts injected per turn. Top-k only, to keep the prompt small.
 _RECALL_FACTS = 8
 
 # A fact is a near-duplicate of an existing one at/above this cosine score.
 _DEDUP_SCORE = 0.92
-# Below this score, a "forget" query is treated as having no real match.
-_FORGET_FLOOR = 0.3
+# Below this score a "forget" request is a no-op, so asking to forget an
+# unstored fact cannot delete its nearest stored neighbor.
+_FORGET_FLOOR = 0.5
 
-# Growth caps per user. Recall injects only top-k items, so a large store
-# costs storage, not tokens. The caps exist solely to stop a hostile or
-# scripted user growing the tables without bound, and are sized so a
-# legitimate user never reaches it (~3 explicit saves/day for a year). Past
-# the cap, writes evict
-# by _eviction_order: auto-extracted facts go before explicit `remember`
-# saves, oldest first.
+# Per-user growth cap. Recall injects only top-k facts, so a large store costs
+# storage, not tokens. The cap exists to stop scripted unbounded growth. Past
+# it, writes evict via _eviction_order: auto-extracted facts first, oldest
+# first.
 _MAX_FACTS: int = 1000
 
-# Cap enforcement scans the namespace, so amortize it: check on the first
-# write per namespace (per process) and every Nth write after. The caps are
-# soft limits sized with huge headroom, so a transient overshoot of a few
-# dozen items between checks is harmless.
+# Cap checks scan the namespace, so amortize: first write per namespace (per
+# process), then every Nth write. Brief overshoot between checks is harmless.
 _CAP_CHECK_EVERY: int = 20
 
-# Budget for the background learn() pass, which costs an extraction-LLM call
-# plus embedding writes per turn. A per-user floor + hourly ceiling stops a
-# scripted user from burning API credits at chat speed; legitimate chat
-# cadence (one message every 10s+) is unaffected.
+# Budget for the background learn() pass (an extraction LLM call plus embedding
+# writes per turn). Per-user floor plus hourly ceiling stops scripted abuse.
+# Normal chat cadence is unaffected.
 _LEARN_MIN_INTERVAL_SECONDS = 10.0
 _LEARN_MAX_PER_HOUR = 60
 
-# Connection pool for the Postgres store. Without a pool, langgraph opens a
-# single shared AsyncConnection and every memory operation across all
-# concurrent requests serializes on it.
+# Postgres connection pool. Without one, langgraph shares a single connection
+# and all memory operations serialize on it.
 _PG_POOL_MIN = 1
 _PG_POOL_MAX = 10
 _PG_SETUP_LOCK_ID = 4848217165257290356
@@ -130,11 +121,9 @@ class MemoryWriteResult(TypedDict):
 
 
 def _embeddings() -> OpenAIEmbeddings | None:
-    """Real-OpenAI embeddings for semantic search (OpenRouter has none).
+    """OpenAI embeddings for semantic search. None when OPENAI_API_KEY is unset.
 
-    Returns ``None`` when ``OPENAI_API_KEY`` is unset so the store still works
-    without an index (recall then degrades to recency). The client reads the key
-    from that same environment variable.
+    Without embeddings the store still works, but recall degrades to recency.
     """
     if not os.getenv("OPENAI_API_KEY"):
         return None
@@ -193,10 +182,8 @@ _store_lock = asyncio.Lock()
 async def setup_store() -> BaseStore:
     """Create (once) and return the process-wide memory store.
 
-    ``AsyncPostgresStore`` when ``DATABASE_URL`` is set - durable + pgvector -
-    otherwise an in-process ``InMemoryStore``. Idempotent and concurrency-safe;
-    the first caller wins. Call once from the app lifespan, or lazily via
-    :func:`ensure_store`.
+    Postgres when ``DATABASE_URL`` is set, otherwise in-memory. Idempotent and
+    concurrency-safe. Call from the app lifespan or lazily via ensure_store.
     """
     global _store, _pg_cm
     async with _store_lock:
@@ -217,9 +204,8 @@ async def setup_store() -> BaseStore:
                 ) from exc
             _pg_cm = AsyncPostgresStore.from_conn_string(
                 db_url,
-                # The dict from _index_config carries the Postgres-specific
-                # ann_index_config key; the shared IndexConfig type is just
-                # narrower than what this store accepts.
+                # _index_config's dict carries Postgres-specific keys beyond
+                # the shared IndexConfig type.
                 index=cast(Any, index),
                 pool_config=cast(Any, _pool_config()),
             )
@@ -254,13 +240,9 @@ async def close_store() -> None:
 
 
 def store_status() -> dict[str, Any]:
-    """Report the active memory backend - for /health and prod verification.
+    """Report the active memory backend for /health. Never touches the DB.
 
-    Cheap and side-effect free: never triggers store setup or touches the DB, so
-    a health check stays fast and doesn't fail when the DB is unreachable. Before
-    the lifespan initializes the store, it reports the *intended* backend
-    inferred from the environment. In production this is the one-request answer
-    to "did this deploy actually get Postgres + DATABASE_URL?".
+    Before init, reports the backend implied by the environment.
     """
     if _store is not None:
         backend = "postgres" if _pg_cm is not None else "in-memory"
@@ -281,12 +263,10 @@ def store_status() -> dict[str, Any]:
 
 
 async def _verify_postgres_vector_dimensions(store: Any) -> None:
-    """Fail clearly when an existing pgvector table has stale dimensions.
+    """Fail at startup when the existing vector column has stale dimensions.
 
-    LangGraph records its own schema migration version, so changing embedding
-    models does not automatically alter an already-created ``vector(N)``
-    column. Starting against a 1536-dimensional table with the 3072-dimensional
-    model would otherwise appear healthy until the first embedding write.
+    Changing embedding models does not migrate an existing column. Without
+    this check the mismatch would surface only on the first embedding write.
     """
     if not _has_index(store):
         return
@@ -324,17 +304,13 @@ async def _setup_postgres_store(store: Any, db_url: str) -> None:
     """Serialize LangGraph's first-run migrations across worker processes."""
     from psycopg import AsyncConnection
 
-    # Use a dedicated autocommit connection for the session-level advisory
-    # lock. Holding a connection from the store's own pool while setup borrows
-    # another can deadlock a small pool, and unnecessarily couples migrations
-    # to runtime pool sizing.
+    # Dedicated autocommit connection for the advisory lock: borrowing from
+    # the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
-        # Do not block inside pg_advisory_lock(): LangGraph creates indexes
-        # CONCURRENTLY, and PostgreSQL waits for every older active transaction.
-        # A second worker blocked in that SELECT would therefore wait for the
-        # first worker's lock while the first waits for the second worker's
-        # transaction. Polling try-lock completes each failed SELECT before the
-        # next attempt and leaves no transaction for CREATE INDEX to wait on.
+        # Poll pg_try_advisory_lock instead of blocking in pg_advisory_lock:
+        # LangGraph runs CREATE INDEX CONCURRENTLY, which waits on every older
+        # open transaction, so a worker parked inside the blocking SELECT
+        # would deadlock the worker holding the lock.
         while True:
             cursor = await conn.execute(
                 "SELECT pg_try_advisory_lock(%s)", (_PG_SETUP_LOCK_ID,)
@@ -383,8 +359,10 @@ async def _search(
 ) -> list[SearchItem]:
     """Semantic search when the store is indexed, else a recency listing.
 
-    Never raises: a failed lookup (network blip, missing index) yields ``[]`` so
-    memory degrades gracefully instead of breaking a turn.
+    Never raises: a failed lookup returns ``[]`` so memory degrades instead of
+    breaking the turn. Backend caveat: no-query listings are newest-first on
+    Postgres but insertion-order (oldest-first) on the dev/CI InMemoryStore,
+    so order-dependent behavior differs between local runs and production.
     """
     if not is_valid_user_id(namespace[0]):
         # Defense in depth: never build a store query from an unsafe namespace
@@ -408,28 +386,21 @@ async def _search(
 def _eviction_order(item: SearchItem) -> tuple[bool, datetime]:
     """Sort key for cap eviction: items to drop first sort first.
 
-    Auto-extracted facts are evicted before explicit `remember` saves - a fact
-    the user asked us to keep is the last thing we drop - and oldest first
-    within each group.
+    Auto-extracted facts go before explicit saves, oldest first within each
+    group.
     """
     explicit = item.value.get("source") == "tool"
     return (explicit, item.created_at)
 
 
-# Per-namespace write counter driving the amortized cap check. In-process only,
-# which is fine: a restart merely re-checks on the next first write.
+# Per-namespace write counter for the amortized cap check. In-process only.
 _write_counters: dict[tuple[str, str], int] = {}
 
 
 async def _enforce_cap(
     store: BaseStore, namespace: tuple[str, str], max_items: int
 ) -> None:
-    """Evict items past ``max_items``.
-
-    The scan is amortized: it runs on the first write per namespace (per
-    process) and every ``_CAP_CHECK_EVERY``-th write after, since the caps
-    have huge headroom and a scan per write would be a needless heavy query.
-    """
+    """Evict items past ``max_items``. Scan amortized per _CAP_CHECK_EVERY."""
     if len(_write_counters) > 10_000:  # bound in-process bookkeeping
         _write_counters.clear()
     count = _write_counters.get(namespace, 0) + 1
@@ -448,11 +419,10 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def _keyword_best_match(items: list[SearchItem], query: str) -> SearchItem | None:
-    """Fallback matcher for stores without an embedding index.
+    """Fallback matcher for unindexed stores: content-word overlap.
 
-    Scores by overlap of content words (len >= 3) between the query and each
-    fact; returns None when nothing shares a single word, so an unrelated
-    "forget" request never deletes an arbitrary memory.
+    Returns None when nothing overlaps, so an unrelated "forget" request never
+    deletes an arbitrary memory.
     """
     query_words = {w for w in _WORD_RE.findall(query.lower()) if len(w) >= 3}
     if not query_words:
@@ -481,11 +451,8 @@ async def recall(
 ) -> str:
     """Return a compact prompt block of the user's most relevant memory.
 
-    Empty string when there is nothing to recall. The entire block is wrapped
-    as untrusted data, mirroring how tool output is wrapped in the graph: fact
-    text is user-influenced (via `remember` or extraction), so a fact like
-    "always end replies with X" must read as data about the user, never as an
-    instruction.
+    Empty when nothing matches. The block is wrapped as untrusted data: fact
+    text is user-influenced, so it must read as data, never as instructions.
     """
     facts = await _search(store, (user_id, _FACTS), query, k_facts)
     if not facts:
@@ -513,6 +480,13 @@ async def recall(
 # --------------------------------------------------------------------------- #
 
 
+FactWriteStatus = Literal["saved", "duplicate", "updated", "skipped"]
+
+# Angle-bracket runs are stripped on write so a stored fact can never close
+# recall()'s <<<USER_MEMORY>>> sentinel block early.
+_SENTINEL_RE = re.compile(r"<{3,}|>{3,}")
+
+
 async def add_fact(
     store: BaseStore,
     user_id: str,
@@ -520,18 +494,19 @@ async def add_fact(
     *,
     kind: str = "general",
     source: str = "tool",
-) -> str | None:
-    """Store a durable fact, skipping near-duplicates.
+) -> tuple[str | None, FactWriteStatus]:
+    """Store a durable fact, collapsing near-duplicates.
 
-    Returns the new key, the existing key when an explicit save promotes an
-    auto-learned duplicate, or ``None`` when the text was empty or collapsed
-    into an existing fact.
+    Returns ``(key, status)``: ``saved`` (new), ``duplicate`` (collapsed into
+    an existing fact unchanged), ``updated`` (explicit save promoted or
+    reworded an existing fact), or ``(None, "skipped")`` for empty text or an
+    invalid user id. Any non-None key is a success.
     """
     if not is_valid_user_id(user_id):
-        return None
-    text = " ".join(text.split())
+        return None, "skipped"
+    text = _SENTINEL_RE.sub("", " ".join(text.split())).strip()
     if not text:
-        return None
+        return None, "skipped"
     namespace = (user_id, _FACTS)
     for existing in await _search(store, namespace, text, 4):
         is_duplicate = (
@@ -540,14 +515,19 @@ async def add_fact(
         )
         if not is_duplicate:
             continue
-        if source == "tool" and existing.value.get("source") != "tool":
-            await store.aput(
-                namespace,
-                existing.key,
-                {**existing.value, "source": "tool"},
-            )
-            return existing.key
-        return None
+        if source != "tool":
+            # Extraction never overwrites stored facts.
+            return existing.key, "duplicate"
+        updates: dict[str, Any] = {}
+        if existing.value.get("source") != "tool":
+            updates["source"] = "tool"
+        if _text(existing) != text:
+            # An explicit restatement wins: a correction must not be lost.
+            updates["text"] = text
+        if not updates:
+            return existing.key, "duplicate"
+        await store.aput(namespace, existing.key, {**existing.value, **updates})
+        return existing.key, "updated"
     key = uuid.uuid4().hex
     await store.aput(
         namespace,
@@ -555,16 +535,14 @@ async def add_fact(
         {"text": text, "kind": kind, "source": source, "created_at": _now()},
     )
     await _enforce_cap(store, namespace, _MAX_FACTS)
-    return key
+    return key, "saved"
 
 
 async def forget(store: BaseStore, user_id: str, query: str) -> str:
     """Delete the single fact most similar to ``query``.
 
-    With semantic search available, a weak best match (below the forget floor)
-    is treated as "nothing to remove". Without an index, a keyword-overlap
-    matcher stands in - so in either mode an unrelated request never deletes an
-    arbitrary fact.
+    A weak best match (below the floor, or no keyword overlap when unindexed)
+    is treated as "nothing to remove", never a deletion.
     """
     namespace = (user_id, _FACTS)
     item: SearchItem | None
@@ -608,20 +586,26 @@ class _ForgetArgs(BaseModel):
 def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
     """Model-callable remember/forget tools bound to one user's namespace.
 
-    The model never sees or supplies ``user_id`` - it is captured in the closure
-    so the tools cannot be steered to read or write another user's memory. An
-    unsafe ``user_id`` yields no tools (memory disabled for that turn).
+    ``user_id`` is captured in the closure, never model-supplied, so the tools
+    cannot touch another user's memory. An unsafe id yields no tools.
     """
     if not is_valid_user_id(user_id):
         return []
 
     async def _remember(fact: str) -> MemoryWriteResult:
         normalized_fact = " ".join(fact.split())
-        memory_id = await add_fact(store, user_id, normalized_fact, source="tool")
+        memory_id, status = await add_fact(
+            store, user_id, normalized_fact, source="tool"
+        )
         if memory_id is None:
             raise ValueError("Memory could not be saved.")
+        messages = {
+            "saved": f"Saved to memory: {normalized_fact}",
+            "updated": f"Updated memory: {normalized_fact}",
+            "duplicate": f"Already in memory: {normalized_fact}",
+        }
         return MemoryWriteResult(
-            message=f"Saved to memory: {normalized_fact}",
+            message=messages.get(status, f"Saved to memory: {normalized_fact}"),
             memory_id=memory_id,
             fact=normalized_fact,
         )
@@ -633,6 +617,7 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
         StructuredTool.from_function(
             coroutine=_remember,
             name=REMEMBER_TOOL,
+            metadata={INTERNAL_MEMORY_METADATA: True},
             description=(
                 "Save a durable fact about the user (a stable preference, "
                 "identity, or ongoing context) so future chats can use it. Call "
@@ -644,6 +629,7 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
         StructuredTool.from_function(
             coroutine=_forget,
             name=FORGET_TOOL,
+            metadata={INTERNAL_MEMORY_METADATA: True},
             description=(
                 "Remove a previously remembered fact about the user. Call this "
                 "when the user asks you to forget something about them."
@@ -666,7 +652,7 @@ _PERSONAL_RE = re.compile(
 
 
 def _worth_extracting(text: str) -> bool:
-    """Cheap gate so trivial turns skip the extra extraction LLM call."""
+    """Cheap gate: trivial turns skip the extraction LLM call."""
     stripped = text.strip()
     if len(stripped) < 12:
         return False
@@ -688,17 +674,12 @@ _EXTRACTION_SYSTEM = (
 )
 
 
-# Per-user timestamps of recent learn() runs, for the abuse budget. In-process
-# only (single instance); bounded below so it cannot grow without limit.
+# Per-user timestamps of recent learn() runs. In-process only. Bounded below.
 _learn_history: dict[str, deque[float]] = {}
 
 
 def _learn_allowed(user_id: str, *, now: float | None = None) -> bool:
-    """Cheap per-user budget for the background learn pass.
-
-    Enforces a minimum gap between runs and an hourly ceiling so a scripted
-    user cannot burn extraction-LLM and embedding credits at chat speed.
-    """
+    """Per-user budget: minimum gap between runs plus an hourly ceiling."""
     current = time.monotonic() if now is None else now
     if len(_learn_history) > 10_000:  # bound in-process bookkeeping
         stale = [
@@ -725,20 +706,23 @@ def _extraction_model_name() -> str:
 
 def _extractor_model() -> ChatOpenAI:
     return ChatOpenAI(
-        model_name=_extraction_model_name(),
-        openai_api_key=SecretStr(os.getenv("OPENROUTER_API_KEY", "")),
-        openai_api_base=OPENROUTER_BASE_URL,
+        model=_extraction_model_name(),
+        api_key=SecretStr(os.getenv("OPENROUTER_API_KEY", "")),
+        base_url=OPENROUTER_BASE_URL,
         temperature=0.0,
     )
 
 
 def _parse_facts(raw: str) -> list[str]:
-    """Parse the extractor's reply into a list of fact strings, tolerantly."""
-    match = re.search(r"\[.*\]", raw.strip(), re.DOTALL)
-    if match:
-        raw = match.group(0)
+    """Parse the extractor's reply tolerantly: decode the first JSON array.
+
+    ``raw_decode`` from the first ``[`` ignores trailing prose entirely.
+    """
+    start = raw.find("[")
+    if start == -1:
+        return []
     try:
-        data = json.loads(raw)
+        data, _ = json.JSONDecoder().raw_decode(raw[start:].strip())
     except json.JSONDecodeError:
         return []
     if not isinstance(data, list):
@@ -758,10 +742,8 @@ async def learn(
 ) -> list[str]:
     """Background write path: distill durable facts from the latest exchange.
 
-    Best-effort and side-effect only; callers run it off the response path so it
-    never adds latency. Returns the facts newly stored (for tests/telemetry).
-    Rate-limited per user, since each run costs an extraction-LLM call plus
-    embedding writes.
+    Best-effort, run off the response path, rate-limited per user. Returns the
+    newly stored facts (for tests/telemetry).
     """
     if not _worth_extracting(user_text):
         return []
@@ -780,7 +762,8 @@ async def learn(
     content = response.content if isinstance(response.content, str) else ""
     stored: list[str] = []
     for fact in _parse_facts(content):
-        if await add_fact(store, user_id, fact, source="extraction") is not None:
+        _, status = await add_fact(store, user_id, fact, source="extraction")
+        if status == "saved":
             stored.append(fact)
     return stored
 
@@ -803,10 +786,14 @@ async def list_facts(
     return [{"id": item.key, **item.value} for item in items]
 
 
-async def delete_fact(store: BaseStore, user_id: str, fact_id: str) -> None:
+async def delete_fact(store: BaseStore, user_id: str, fact_id: str) -> bool:
+    """Delete one fact, returning whether it existed."""
     if not is_valid_user_id(user_id):
-        return
+        return False
+    if await store.aget((user_id, _FACTS), fact_id) is None:
+        return False
     await store.adelete((user_id, _FACTS), fact_id)
+    return True
 
 
 def _memory_type(item: Item) -> MemoryType:
@@ -834,11 +821,10 @@ async def list_memory_items(
     limit: int = 200,
     offset: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
-    """List learned and explicitly remembered facts with literal text search.
+    """List learned and remembered facts with literal substring search.
 
-    Management search deliberately uses case-insensitive substring matching,
-    not embeddings: it is predictable for users and does not spend embedding
-    API credits on each search-field update. Raw chat turns are never returned.
+    Deliberately not semantic: predictable for users and free of per-keystroke
+    embedding cost.
     """
     if not is_valid_user_id(user_id):
         return [], 0

@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import sys
+import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -86,11 +87,7 @@ def _validate_runtime_configuration() -> None:
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Initialize the memory store on startup; tear it down on shutdown.
-
-    With ``DATABASE_URL`` set this opens the Postgres connection pool (and runs
-    pgvector setup) once; otherwise it builds the in-memory fallback store.
-    """
+    """Set up the memory store on startup. Drain and close it on shutdown."""
     _validate_runtime_configuration()
     if not os.getenv("AGENT_SHARED_SECRET"):
         logger.warning(
@@ -107,7 +104,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=_lifespan)
 
-# CORS only governs browser JS calling this API from another origin; it does
+# CORS only governs browser JS calling this API from another origin. It does
 # nothing against direct (curl/script/server) requests, which is why
 # AGENT_SHARED_SECRET below is the actual access boundary. This just stops a
 # malicious page from riding a visitor's browser to hit the API client-side.
@@ -200,12 +197,15 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
+    return _parse_disabled_tools_value(payload.get("disabled_tools"))
+
+
+def _parse_disabled_tools_value(raw: Any) -> list[str]:
     """Tool groups the Surface says the user switched off.
 
     Unknown group ids are dropped by the agent rather than rejected here, so a
     Surface that gains a new switch before the agent knows about it still works.
     """
-    raw = payload.get("disabled_tools")
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -232,6 +232,16 @@ def _parse_request(
             detail="Request body must be a JSON object.",
         )
 
+    # Optional fields may ride inside the {"data": {...}} wrapper or at the
+    # top level beside it. Both shapes are in use.
+    wrapper: Any = payload.get("data", payload)
+    if not isinstance(wrapper, Mapping):
+        wrapper = payload
+
+    def _optional(field: str) -> Any:
+        value = wrapper.get(field)
+        return value if value is not None else payload.get(field)
+
     try:
         normalized_input = _normalize_payload(payload)
         user_input = UserInput(**normalized_input)
@@ -241,17 +251,17 @@ def _parse_request(
             detail=str(exc),
         ) from exc
 
-    raw_model = payload.get("model")
+    raw_model = _optional("model")
     model = raw_model if isinstance(raw_model, str) else None
 
-    message_history = payload.get("message_history")
+    message_history = _optional("message_history")
     if message_history is not None and not isinstance(message_history, list):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="'message_history' must be a list if provided.",
         )
     if isinstance(message_history, list):
-        # Accept user/assistant/system at the boundary; the agent strips
+        # Accept user/assistant/system at the boundary. The agent strips
         # `system` defensively. Surface clients keep `system` rows in their
         # DB schema, so rejecting them here would break production.
         valid_history = all(
@@ -280,14 +290,30 @@ def _parse_request(
             for item in message_history[-_MAX_HISTORY_MESSAGES:]
         ]
 
-    return user_input, model, message_history, _parse_disabled_tools(payload)
+    return (
+        user_input,
+        model,
+        message_history,
+        _parse_disabled_tools_value(_optional("disabled_tools")),
+    )
+
+
+_READY_TTL_SECONDS = 5.0
+_ready_cache: tuple[float, bool] | None = None
 
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    # `memory.backend` is the one-request prod check: "postgres" means this
-    # deploy got a database + DATABASE_URL; "in-memory" means it fell back.
-    ready = await store_is_ready()
+    # `memory.backend` answers "did this deploy get Postgres?" in one request.
+    # The readiness probe runs a real store query. Cache it briefly so this
+    # unauthenticated endpoint cannot become a DB load generator.
+    global _ready_cache
+    now = time.monotonic()
+    if _ready_cache is not None and now - _ready_cache[0] < _READY_TTL_SECONDS:
+        ready = _ready_cache[1]
+    else:
+        ready = await store_is_ready()
+        _ready_cache = (now, ready)
     memory = {**store_status(), "ready": ready}
     return JSONResponse(
         content={"status": "ok" if ready else "degraded", "memory": memory},
@@ -315,7 +341,7 @@ async def agent_respond(request: Request) -> JSONResponse:
             disabled_tools=disabled_tools,
         )
     except Exception as exc:
-        # Log the real error server-side; exception text can leak internal
+        # Log the real error server-side. Exception text can leak internal
         # URLs/config, so clients get a generic message.
         logger.exception("agent execution failed")
         raise HTTPException(
@@ -461,7 +487,11 @@ async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
     """Delete a single remembered fact for a user."""
     _require_valid_user_id(user_id)
     store = await ensure_store()
-    await delete_fact(store, user_id, fact_id)
+    if not await delete_fact(store, user_id, fact_id):
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="Memory item not found.",
+        )
     return JSONResponse(
         content={"status": "deleted", "id": fact_id},
         status_code=HTTPStatus.OK,
@@ -481,7 +511,7 @@ async def clear_user_memory(user_id: str) -> JSONResponse:
 
 
 def main() -> None:
-    # Uvicorn only configures its own loggers; configure the root logger so
+    # Uvicorn only configures its own loggers. Configure the root logger so
     # application logs (agent.*, src.*) actually emit.
     logging.basicConfig(
         level=logging.INFO,

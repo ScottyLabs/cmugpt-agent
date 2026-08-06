@@ -75,26 +75,40 @@ async def _test_recall_roundtrip_and_isolation() -> None:
 
 async def _test_dedup_skips_duplicates() -> None:
     store = _indexed_store()
-    first = await memory.add_fact(store, "u1", "Lives in Morewood")
-    dup = await memory.add_fact(store, "u1", "lives in morewood")  # case variant
+    first, first_status = await memory.add_fact(store, "u1", "Lives in Morewood")
+    dup, dup_status = await memory.add_fact(
+        store, "u1", "lives in morewood"
+    )  # case variant
     assert_true(first is not None, "first fact stored")
-    assert_true(dup is None, "duplicate fact skipped")
+    assert_equal(first_status, "saved", "first fact reports saved")
+    assert_equal(dup, first, "duplicate collapses onto the existing fact")
+    assert_true(dup_status in ("duplicate", "updated"), "duplicate is not a failure")
     facts = await memory.list_facts(store, "u1")
     assert_equal(len(facts), 1, "only one fact persisted")
+
+    # Re-remembering must read as success to the tool layer, never an error.
+    tools = memory.build_memory_tools(store, "u1")
+    remember = next(t for t in tools if t.name == memory.REMEMBER_TOOL)
+    receipt = await remember.ainvoke({"fact": "Lives in Morewood"})
+    assert_true(
+        "Already in memory" in receipt["message"]
+        or "Updated memory" in receipt["message"],
+        "re-remember confirms instead of failing",
+    )
 
 
 async def _test_explicit_save_promotes_learned_duplicate() -> None:
     store = _indexed_store()
-    learned_id = await memory.add_fact(
+    learned_id, _ = await memory.add_fact(
         store,
         "u1",
         "Prefers quiet study spaces",
         source="extraction",
     )
-    remembered_id = await memory.add_fact(
+    remembered_id, promote_status = await memory.add_fact(
         store,
         "u1",
-        "Prefers quiet study spaces",
+        "prefers QUIET study spaces",  # user's restated wording
         source="tool",
     )
     assert_equal(
@@ -102,9 +116,15 @@ async def _test_explicit_save_promotes_learned_duplicate() -> None:
         learned_id,
         "an explicit save promotes rather than duplicates an auto-learned fact",
     )
+    assert_equal(promote_status, "updated", "promotion is reported as an update")
     items, total = await memory.list_memory_items(store, "u1")
     assert_equal(total, 1, "promotion keeps one fact")
     assert_equal(items[0]["type"], "remembered", "explicit intent is reflected")
+    assert_equal(
+        items[0]["text"],
+        "prefers QUIET study spaces",
+        "an explicit restatement's wording replaces the auto-learned text",
+    )
 
 
 async def _test_forget_removes_best_match() -> None:
@@ -155,7 +175,7 @@ async def _test_user_id_wildcard_cannot_cross_read() -> None:
     await memory.add_fact(store, "alice", "Alice is allergic to shellfish")
     await memory.add_fact(store, "bob", "Bob lives in Morewood")
 
-    # '%' / '_' are SQL LIKE wildcards; the allowlist must reject them so they
+    # '%' / '_' are SQL LIKE wildcards. The allowlist must reject them so they
     # never reach the store's (unescaped) LIKE prefix match.
     assert_true(not memory.is_valid_user_id("%"), "'%' rejected")
     assert_true(not memory.is_valid_user_id("_"), "'_' rejected")
@@ -171,7 +191,9 @@ async def _test_user_id_wildcard_cannot_cross_read() -> None:
     assert_true("No matching" in forget_msg, "forget blocked")
 
     # A wildcard-id write is a no-op (never pollutes a real namespace).
-    assert_true(await memory.add_fact(store, "%", "injected") is None, "write blocked")
+    blocked_key, blocked_status = await memory.add_fact(store, "%", "injected")
+    assert_true(blocked_key is None, "write blocked")
+    assert_equal(blocked_status, "skipped", "blocked write reports skipped")
     assert_equal(memory.build_memory_tools(store, "%"), [], "no tools for bad id")
 
 
