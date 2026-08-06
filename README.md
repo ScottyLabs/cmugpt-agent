@@ -69,7 +69,7 @@ PORT=8080 uv run python src/main.py
 Verify that memory is actually durable:
 
 ```sh
-curl -s http://localhost:5000/health
+curl -s http://localhost:5000/api/health
 ```
 
 The response must report `memory.backend` as `postgres`, `memory.ready` as
@@ -98,16 +98,18 @@ Set production secrets (requires `cmugpt-agent-admins` group and `bao login -met
 secretspec set -P prod OPENROUTER_API_KEY
 secretspec set -P prod OPENAI_API_KEY
 secretspec set -P prod MCP_SERVER_URL
-secretspec set -P prod DATABASE_URL
 secretspec set -P prod AGENT_SHARED_SECRET
 secretspec check -P prod
 ```
 
+`DATABASE_URL` is not an OpenBao secret: Kennel injects it into the process
+environment from its platform-managed Postgres, so it is deliberately not
+declared in `secretspec.toml`. The database in `devenv.nix` fills the same
+role for local development.
+
 Production must set `AGENT_ENV=production` (the `Procfile` already does). The
 agent refuses to start in production if `DATABASE_URL` or
-`AGENT_SHARED_SECRET` is missing. Provision the production PostgreSQL/pgvector
-database separately; the database in `devenv.nix` is local-development
-infrastructure.
+`AGENT_SHARED_SECRET` is missing from the environment.
 
 ## Guidelines
 

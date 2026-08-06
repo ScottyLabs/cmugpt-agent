@@ -38,7 +38,7 @@ from typing import Any, Literal, TypedDict, cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langgraph.store.base import BaseStore, IndexConfig, SearchItem
+from langgraph.store.base import BaseStore, IndexConfig, Item, SearchItem
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field, SecretStr
 
@@ -87,13 +87,13 @@ _FORGET_FLOOR = 0.3
 # the cap, writes evict
 # by _eviction_order: auto-extracted facts go before explicit `remember`
 # saves, oldest first.
-_MAX_FACTS = 1000
+_MAX_FACTS: int = 1000
 
 # Cap enforcement scans the namespace, so amortize it: check on the first
 # write per namespace (per process) and every Nth write after. The caps are
 # soft limits sized with huge headroom, so a transient overshoot of a few
 # dozen items between checks is harmless.
-_CAP_CHECK_EVERY = 20
+_CAP_CHECK_EVERY: int = 20
 
 # Budget for the background learn() pass, which costs an extraction-LLM call
 # plus embedding writes per turn. A per-user floor + hourly ceiling stops a
@@ -217,7 +217,10 @@ async def setup_store() -> BaseStore:
                 ) from exc
             _pg_cm = AsyncPostgresStore.from_conn_string(
                 db_url,
-                index=index,
+                # The dict from _index_config carries the Postgres-specific
+                # ann_index_config key; the shared IndexConfig type is just
+                # narrower than what this store accepts.
+                index=cast(Any, index),
                 pool_config=cast(Any, _pool_config()),
             )
             pg_store = await _pg_cm.__aenter__()
@@ -806,7 +809,7 @@ async def delete_fact(store: BaseStore, user_id: str, fact_id: str) -> None:
     await store.adelete((user_id, _FACTS), fact_id)
 
 
-def _memory_type(item: SearchItem) -> MemoryType:
+def _memory_type(item: Item) -> MemoryType:
     return "learned" if item.value.get("source") == "extraction" else "remembered"
 
 

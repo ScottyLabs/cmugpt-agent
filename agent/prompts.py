@@ -7,8 +7,11 @@ output. All safety, scope, anti-hallucination, and tool-transparency rules are
 preserved verbatim.
 """
 
+from collections.abc import Iterable
+
 from langchain_core.tools import BaseTool
 
+from .mcp_tools import disabled_group_labels, normalize_disabled_groups
 from .memory import MEMORY_TOOL_NAMES
 
 # Substrings that mark a tool as capable of returning a route/path between two
@@ -66,13 +69,27 @@ def _memory_section(has_memory_tools: bool) -> str:
     )
 
 
-def _directions_section(has_routing_tool: bool) -> str:
+def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
     """Directions guidance, tailored to whether a routing tool is available.
 
     Without a routing tool the model cannot compute a real route, so it must not
     invent turn-by-turn steps or claim a lookup failed - the deterministic map
     attached to the answer is the source of truth for the route.
+
+    With CMUMaps switched off there is no map at all: nothing is attached to the
+    answer, so the model must not promise one.
     """
+    if not maps_enabled:
+        return (
+            "## Directions and campus navigation\n"
+            "The user has switched CMUMaps OFF, so you have no building lookup, "
+            "no routing, and NO map is attached to your answer. Do NOT invent "
+            "step-by-step turns, distances, or times, and do NOT tell the user "
+            "to look at a map below - there is none. Say plainly that campus "
+            "maps are turned off and they can switch CMUMaps back on in "
+            "Settings. You may add one or two sentences of general orientation "
+            "from confident general knowledge, marked as approximate.\n"
+        )
     if has_routing_tool:
         return (
             "## Directions and campus navigation\n"
@@ -97,8 +114,38 @@ def _directions_section(has_routing_tool: bool) -> str:
     )
 
 
-def build_system_prompt(tools: list[BaseTool] | None) -> str:
-    """Compose the system prompt, injecting any discovered MCP tools."""
+def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
+    """Tell the model which tool groups the user switched off, if any.
+
+    The tools themselves are already gone from the catalog and from the model's
+    bound schemas, so this section only exists so the model can explain *why* it
+    cannot look something up instead of guessing at the data.
+    """
+    labels = disabled_group_labels(disabled_tools)
+    if not labels:
+        return ""
+    names = ", ".join(f"**{label}**" for label in labels)
+    return (
+        "## Tools the user switched off\n"
+        f"The user has turned these CMU tools OFF for this conversation: {names}. "
+        "They are unavailable to you this turn. If answering would need one, say "
+        "plainly that the tool is switched off and that they can turn it back on "
+        "in Settings. Do NOT guess at the data it would have returned, and do "
+        "NOT claim a lookup failed or errored - nothing was attempted.\n"
+        "\n"
+    )
+
+
+def build_system_prompt(
+    tools: list[BaseTool] | None,
+    disabled_tools: Iterable[str] | None = None,
+) -> str:
+    """Compose the system prompt, injecting any discovered MCP tools.
+
+    `tools` is expected to be already filtered (see `mcp_tools.filter_tools`);
+    `disabled_tools` is what was filtered out, used only for the explanatory
+    section above.
+    """
     tool_catalog = "No external tools are available right now."
     if tools:
         lines = []
@@ -109,7 +156,9 @@ def build_system_prompt(tools: list[BaseTool] | None) -> str:
             lines.append(f"- `{name}`: {short}" if short else f"- `{name}`")
         tool_catalog = "Available tools (call them by exact name):\n" + "\n".join(lines)
 
-    directions_section = _directions_section(_has_routing_tool(tools))
+    maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
+    directions_section = _directions_section(_has_routing_tool(tools), maps_enabled)
+    disabled_section = _disabled_tools_section(disabled_tools)
     memory_section = _memory_section(_has_memory_tools(tools))
 
     return (
@@ -217,6 +266,7 @@ def build_system_prompt(tools: list[BaseTool] | None) -> str:
         "- After tool results return, synthesize them into a final answer "
         "in the same conversation. Don't stall again.\n"
         "\n"
+        f"{disabled_section}"
         "## Tool transparency\n"
         "If the user asks whether you use tools, MCPs, external services, "
         "or how you got an answer: answer honestly at a high level. You may "

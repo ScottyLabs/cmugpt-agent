@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
@@ -106,6 +107,22 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=_lifespan)
 
+# CORS only governs browser JS calling this API from another origin; it does
+# nothing against direct (curl/script/server) requests, which is why
+# AGENT_SHARED_SECRET below is the actual access boundary. This just stops a
+# malicious page from riding a visitor's browser to hit the API client-side.
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "https://cmugpt.com").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
 # Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
 # to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
 # auth is skipped (local dev). The HTTPBearer scheme has auto_error=False so
@@ -182,10 +199,33 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
+    """Tool groups the Surface says the user switched off.
+
+    Unknown group ids are dropped by the agent rather than rejected here, so a
+    Surface that gains a new switch before the agent knows about it still works.
+    """
+    raw = payload.get("disabled_tools")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'disabled_tools' must be a list of strings if provided.",
+        )
+    items = [item for item in raw if isinstance(item, str)]
+    if len(items) != len(raw):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'disabled_tools' must be a list of strings if provided.",
+        )
+    return items
+
+
 def _parse_request(
     payload: Any,
-) -> tuple[UserInput, str | None, list[dict[str, str]] | None]:
-    """Validate the request body and return (user_input, model, history)."""
+) -> tuple[UserInput, str | None, list[dict[str, str]] | None, list[str]]:
+    """Validate the body and return (user_input, model, history, disabled_tools)."""
     if not isinstance(payload, Mapping):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -240,10 +280,10 @@ def _parse_request(
             for item in message_history[-_MAX_HISTORY_MESSAGES:]
         ]
 
-    return user_input, model, message_history
+    return user_input, model, message_history, _parse_disabled_tools(payload)
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health() -> JSONResponse:
     # `memory.backend` is the one-request prod check: "postgres" means this
     # deploy got a database + DATABASE_URL; "in-memory" means it fell back.
@@ -265,13 +305,14 @@ async def agent_respond(request: Request) -> JSONResponse:
             detail="Request body must be valid JSON object.",
         ) from exc
 
-    user_input, model, message_history = _parse_request(payload)
+    user_input, model, message_history, disabled_tools = _parse_request(payload)
 
     try:
         agent_response = await run_agent(
             user_input=user_input,
-            model=model or "openai/gpt-4o",
+            model=model or "openai/gpt-5.4-mini",
             message_history=message_history,
+            disabled_tools=disabled_tools,
         )
     except Exception as exc:
         # Log the real error server-side; exception text can leak internal
@@ -315,14 +356,15 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
             detail="Request body must be valid JSON object.",
         ) from exc
 
-    user_input, model, message_history = _parse_request(payload)
+    user_input, model, message_history, disabled_tools = _parse_request(payload)
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
             async for event_name, data in stream_agent_response(
                 user_input=user_input,
-                model=model or "openai/gpt-4o",
+                model=model or "openai/gpt-5.4-mini",
                 message_history=message_history,
+                disabled_tools=disabled_tools,
             ):
                 yield _sse(event_name, data).encode("utf-8")
         except Exception:

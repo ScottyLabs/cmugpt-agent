@@ -1,8 +1,8 @@
 """Building catalog loaded from the committed ``buildings.json``.
 
 ``buildings.json`` is a flat ``{code: name}`` map (e.g. ``"MOR": "Morewood
-Gardens"``) and nothing else. Everything users actually type against —
-aliases, the reverse index, fuzzy single-word matches — is derived here at load
+Gardens"``) and nothing else. Everything users actually type against -
+aliases, the reverse index, fuzzy single-word matches - is derived here at load
 time, so the data file stays tiny and human-editable while a user can still say
 "scott", "scott hall", or "donner" and get the right CMU Maps code.
 

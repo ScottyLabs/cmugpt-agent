@@ -53,7 +53,7 @@ from .guards import (
     compute_thought,
     should_require_tool,
 )
-from .mcp_tools import load_mcp_tools
+from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
 from .memory import (
     FORGET_TOOL,
     MEMORY_TOOL_NAMES,
@@ -87,6 +87,10 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
+    # Tool groups the user switched off in the Surface. Their tools are already
+    # gone from the bound tool list; postprocess reads this to keep the
+    # deterministic CMU Maps embed off too.
+    disabled_tools: list[str]
 
 
 # Background memory-extraction tasks are fire-and-forget; hold references so the
@@ -145,9 +149,9 @@ def _api_key() -> str:
 @lru_cache(maxsize=16)
 def _make_chat_model_for_key(model: str, api_key: str) -> ChatOpenAI:
     return ChatOpenAI(
-        model_name=model,
-        openai_api_key=SecretStr(api_key),
-        openai_api_base=OPENROUTER_BASE_URL,
+        model=model,
+        api_key=SecretStr(api_key),
+        base_url=OPENROUTER_BASE_URL,
     )
 
 
@@ -204,7 +208,7 @@ def _needs_memory_recall(query: str) -> bool:
     return bool(_MEMORY_RECALL_RE.search(query))
 
 
-def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
+def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
     # Forcing a tool is only about CMU *data* lookups; the memory tools must
@@ -213,8 +217,17 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
+        # `tool_choice="required"` stops the model answering CMU data questions
+        # from memory, but it forces *some* call from whatever is left bound. Once
+        # the user has switched a group off, the tool that would have served the
+        # question may be gone, and forcing then picks an unrelated one: a wasted
+        # call that also lands in `services_used` and misreports how the answer
+        # was sourced. So only force while the full toolset is available; the
+        # prompt still tells the model to use what it has and to say when a tool
+        # is off.
         force_tool = (
             has_data_tools
+            and not normalize_disabled_groups(state.get("disabled_tools"))
             and not state["services_used"]
             and should_require_tool(_helper_messages(query))
         )
@@ -235,8 +248,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool]):
         #     preamble) is not the final answer.
         #   * map queries: the model sometimes falsely claims it couldn't look
         #     up locations even though we have a working map; we strip that out
-        #     in postprocess, so it must not stream live.
-        suppress_stream = force_tool or query_has_map_intent(query)
+        #     in postprocess, so it must not stream live. With CMUMaps switched
+        #     off there is no map to contradict, so nothing needs repairing.
+        suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
@@ -378,7 +392,10 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
+    # A switched-off CMUMaps means no map embed either, not just no map tools:
+    # the guard below is what attaches the deterministic map to the answer.
+    if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
+        parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
@@ -442,14 +459,21 @@ def build_graph(
     store: BaseStore | None,
     *,
     recall_enabled: bool,
+    maps_enabled: bool = True,
 ):
     """Compile the agent graph for one request (model + tools + store captured).
 
     Shape: ``START -> recall -> agent`` then either ``-> tools -> agent`` or
     ``-> postprocess -> END``; postprocess schedules the background learn task.
+    `tools` must already have the user's disabled groups filtered out: the
+    agent node binds exactly this list, so anything missing here is uncallable.
     """
-    graph = StateGraph(AgentState)
-    graph.add_node("agent", _build_agent_node(model, tools))
+    # ty doesn't yet structurally match TypedDict's synthesized __required_keys__/
+    # __optional_keys__ against langgraph's StateLike protocol (confirmed still
+    # failing on ty 0.0.65); AgentState is a plain TypedDict, the canonical shape
+    # LangGraph expects here.
+    graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
+    graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
     graph.add_node("tools", _build_tools_node(tools))
     graph.add_node("postprocess", _postprocess_node)
 
@@ -473,7 +497,7 @@ def build_graph(
 
 
 @lru_cache(maxsize=16)
-def _build_no_tool_graph(model: str, api_key: str):
+def _build_no_tool_graph(model: str, api_key: str, maps_enabled: bool):
     """Reusable graph for no-tool/no-memory turns.
 
     This cache saves graph compilation time only. The request state still uses
@@ -484,6 +508,7 @@ def _build_no_tool_graph(model: str, api_key: str):
         [],
         None,
         recall_enabled=False,
+        maps_enabled=maps_enabled,
     )
 
 
@@ -493,14 +518,16 @@ def _graph_for_request(
     store: BaseStore | None,
     *,
     recall_enabled: bool,
+    maps_enabled: bool,
 ):
     if not tools and store is None and not recall_enabled:
-        return _build_no_tool_graph(model, _api_key())
+        return _build_no_tool_graph(model, _api_key(), maps_enabled)
     return build_graph(
         _make_chat_model(model),
         tools,
         store,
         recall_enabled=recall_enabled,
+        maps_enabled=maps_enabled,
     )
 
 
@@ -531,8 +558,10 @@ def _initial_state(
     user_input: UserInput,
     message_history: list[dict[str, str]] | None,
     tools: list[BaseTool],
+    disabled_tools: list[str] | None = None,
 ) -> AgentState:
-    messages: list[AnyMessage] = [SystemMessage(content=build_system_prompt(tools))]
+    prompt = build_system_prompt(tools, disabled_tools)
+    messages: list[AnyMessage] = [SystemMessage(content=prompt)]
     messages.extend(_sanitize_history(message_history))
     messages.append(HumanMessage(content=user_input.query))
     return AgentState(
@@ -545,18 +574,23 @@ def _initial_state(
         response_text="",
         streamed=False,
         response_payload={},
+        disabled_tools=list(disabled_tools or []),
     )
 
 
 async def _prepare_tools_and_store(
     user_input: UserInput,
-) -> tuple[list[BaseTool], BaseStore | None, bool]:
+    disabled_tools: list[str] | None,
+) -> tuple[list[BaseTool], BaseStore | None, bool, bool]:
     """Plan the turn and prepare only the tools/store it can actually use.
 
     The latency-sensitive path is ordinary chat: no campus data lookup, no map,
     no explicit memory operation, and no useful recalled memory. Those turns
     avoid MCP discovery, tool schema binding, and Postgres store setup. Every
     LLM-backed turn still receives the same canonical security policy.
+    User-disabled tool groups are dropped before the model ever sees them, and
+    the memory tools are appended after filtering so a toggle can never remove
+    them.
     """
     query = user_input.query
     user_id = user_input.user_id
@@ -564,10 +598,11 @@ async def _prepare_tools_and_store(
     needs_data_tools = _needs_data_tools(query)
     needs_memory_tools = bool(user_id) and _needs_memory_tools(query)
     recall_enabled = bool(user_id) and _needs_memory_recall(query)
+    maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
 
     tools: list[BaseTool] = []
     if needs_data_tools:
-        tools.extend(await load_mcp_tools())
+        tools.extend(filter_tools(await load_mcp_tools(), disabled_tools))
 
     store: BaseStore | None = None
     if recall_enabled or needs_memory_tools:
@@ -576,29 +611,39 @@ async def _prepare_tools_and_store(
     if user_id and needs_memory_tools and store is not None:
         tools = [*tools, *build_memory_tools(store, user_id)]
 
-    return tools, store, recall_enabled
+    return tools, store, recall_enabled, maps_enabled
 
 
 async def run_agent(
     user_input: UserInput,
-    model: str = "openai/gpt-4o",
+    model: str = "openai/gpt-5.4-mini",
     message_history: list[dict[str, str]] | None = None,
+    disabled_tools: list[str] | None = None,
 ) -> AgentResponse:
-    """Non-streaming entry point. Runs the graph and returns the full response."""
+    """Non-streaming entry point. Runs the graph and returns the full response.
+
+    `disabled_tools` lists the tool groups the user switched off in the Surface
+    (`maps`, `courses`, `eats`, `guide`); those tools are never bound.
+    """
     if not _api_key():
         return _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
         )
 
-    tools, store, recall_enabled = await _prepare_tools_and_store(user_input)
+    tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
+        user_input, disabled_tools
+    )
     graph = _graph_for_request(
         model,
         tools,
         store,
         recall_enabled=recall_enabled,
+        maps_enabled=maps_enabled,
     )
-    final = await graph.ainvoke(_initial_state(user_input, message_history, tools))
+    final = await graph.ainvoke(
+        _initial_state(user_input, message_history, tools, disabled_tools)
+    )
 
     payload = final.get("response_payload")
     if isinstance(payload, dict) and payload:
@@ -614,6 +659,7 @@ async def stream_agent_response(
     user_input: UserInput,
     model: str,
     message_history: list[dict[str, str]] | None,
+    disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Streaming entry point: yields ('delta', ...) ... ('done', ...) events."""
     if not _api_key():
@@ -625,16 +671,19 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    tools, store, recall_enabled = await _prepare_tools_and_store(user_input)
+    tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
+        user_input, disabled_tools
+    )
     graph = _graph_for_request(
         model,
         tools,
         store,
         recall_enabled=recall_enabled,
+        maps_enabled=maps_enabled,
     )
 
     async for chunk in graph.astream(
-        _initial_state(user_input, message_history, tools),
+        _initial_state(user_input, message_history, tools, disabled_tools),
         stream_mode="custom",
     ):
         if isinstance(chunk, dict) and "event" in chunk:
