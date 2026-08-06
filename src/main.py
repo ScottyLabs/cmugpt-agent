@@ -40,7 +40,7 @@ from agent.memory import (
 logger = logging.getLogger(__name__)
 
 # Input caps: these payloads flow straight into LLM calls (token cost) and,
-# for user_id, into per-user database namespaces — so none of them may be
+# for user_id, into per-user database namespaces - so none of them may be
 # caller-controlled without bounds.
 _MAX_QUERY_CHARS = 8_000
 _MAX_USER_ID_CHARS = 128
@@ -166,7 +166,7 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if user_id is not None and not isinstance(user_id, str):
         raise ValueError("'user_id' must be a string if provided.")
     # user_id becomes a per-user database namespace matched with an unescaped
-    # SQL LIKE, so it must exclude wildcard/separator characters — not merely be
+    # SQL LIKE, so it must exclude wildcard/separator characters - not merely be
     # printable. is_valid_user_id enforces the safe allowlist.
     if user_id is not None and not is_valid_user_id(user_id):
         raise ValueError(

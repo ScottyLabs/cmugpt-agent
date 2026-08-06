@@ -10,13 +10,15 @@ This project makes use of several excellent tools from [Astral](https://github.c
 uv sync
 ```
 
-Copy `.env.example` to `.env` and fill in the keys. For durable user memory,
-create a PostgreSQL database with pgvector and set `DATABASE_URL`:
+Create a `.env` file with `OPENROUTER_API_KEY`, `MCP_SERVER_URL`,
+`OPENAI_API_KEY`, `AGENT_SHARED_SECRET`, and `DATABASE_URL`. For durable user
+memory, create a PostgreSQL database with pgvector and point `DATABASE_URL` at
+it (for example `postgresql:///cmugpt_agent?host=/tmp` for a local unix-socket
+server):
 
 ```sh
 createdb cmugpt_agent
 psql -d cmugpt_agent -c 'CREATE EXTENSION IF NOT EXISTS vector;'
-cp .env.example .env
 ```
 
 `OPENROUTER_API_KEY` powers chat and memory extraction. `OPENAI_API_KEY` is a
@@ -25,12 +27,12 @@ real OpenAI key used for `text-embedding-3-large` semantic search. The
 only with the Surface server; generate one with `openssl rand -hex 32` and never
 put it in browser-visible configuration.
 
-The large embedding model uses a pgvector `halfvec(3072)` HNSW index. Start with
-a fresh memory database. If a database was previously initialized for
-`text-embedding-3-small`, rebuild its `store_vectors` and `vector_migrations`
-tables and re-index any memory you need to retain before deploying this version;
-startup rejects an incompatible old vector column instead of failing on a later
-write.
+The embedding model uses a pgvector `halfvec(3072)` HNSW index. Startup
+verifies that an existing `store_vectors` table matches this shape and refuses
+to start against a database initialized for a different embedding model; in
+that case rebuild the `store_vectors` and `vector_migrations` tables and
+re-index any memory you need to retain. A fresh database needs no preparation
+beyond `CREATE EXTENSION vector`.
 
 Long-term memory stores only durable facts: facts distilled from chats and facts
 the user explicitly asks CMUGPT to remember. Raw user/assistant turns are not

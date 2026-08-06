@@ -176,7 +176,7 @@ async def _test_user_id_wildcard_cannot_cross_read() -> None:
 
 
 async def _test_recall_without_index_degrades() -> None:
-    store = InMemoryStore()  # no embeddings — recency fallback
+    store = InMemoryStore()  # no embeddings - recency fallback
     await memory.add_fact(store, "u1", "Plays club soccer on weekends")
     block = await memory.recall(store, "u1", "hobbies")
     assert_true("club soccer" in block, "recall works without an index")

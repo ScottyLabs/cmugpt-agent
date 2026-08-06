@@ -116,7 +116,7 @@ async def drain_background_tasks(timeout: float = 15.0) -> None:
 
 _MEMORY_TOOL_RE = re.compile(
     r"\b("
-    r"remember|don['’]?t\s+forget|forget|delete\s+(?:my\s+)?memory|"
+    r"remember|don['\u2019]?t\s+forget|forget|delete\s+(?:my\s+)?memory|"
     r"remove\s+(?:that|this|it|my\s+memory)|what\s+do\s+you\s+remember|"
     r"what\s+do\s+you\s+know\s+about\s+me"
     r")\b",
@@ -125,7 +125,7 @@ _MEMORY_TOOL_RE = re.compile(
 
 _MEMORY_RECALL_RE = re.compile(
     r"\b("
-    r"my|me|for\s+me|i['’]?m|im|i\s+am|i\s+have|i\s+need|i\s+prefer|"
+    r"my|me|for\s+me|i['\u2019]?m|im|i\s+am|i\s+have|i\s+need|i\s+prefer|"
     r"i\s+(?:like|love|enjoy|hate|dislike|want|wish|told|said|mentioned)|"
     r"(?:do|did|can|could|would|should|have|am|was)\s+i|"
     r"preference|prefer|allerg|diet|vegetarian|vegan|major|minor|class|"
@@ -136,6 +136,7 @@ _MEMORY_RECALL_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
 
 def _api_key() -> str:
     return os.getenv("OPENROUTER_API_KEY", "")
@@ -383,7 +384,7 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
     # When the answer was buffered (forced tool pass or a map query), it hasn't
-    # been streamed yet — emit the repaired text now so the user only ever sees
+    # been streamed yet - emit the repaired text now so the user only ever sees
     # the corrected version.
     if not state.get("streamed") and parsed.response_text:
         writer({"event": "delta", "data": {"text": parsed.response_text}})
@@ -393,7 +394,7 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
 
     # Schedule the background learn pass BEFORE emitting `done`: streaming
     # clients often disconnect right after the final event, which cancels the
-    # graph — the task must already exist by then or memories are silently
+    # graph - the task must already exist by then or memories are silently
     # never learned.
     user_id = state.get("user_id")
     if user_id and parsed.response_text:

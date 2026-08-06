@@ -3,12 +3,12 @@
 This module owns everything stateful about user memory so the rest of the agent
 keeps its mostly-stateless shape. It provides:
 
-* a process-wide LangGraph ``BaseStore`` singleton — ``AsyncPostgresStore`` with
+* a process-wide LangGraph ``BaseStore`` singleton - ``AsyncPostgresStore`` with
   pgvector when ``DATABASE_URL`` is set (durable, vector search), otherwise an
   ``InMemoryStore`` so local dev and CI run with no database;
-* the read path — :func:`recall` — semantic top-k retrieval of durable facts,
+* the read path - :func:`recall` - semantic top-k retrieval of durable facts,
   formatted into a compact prompt block;
-* the write paths — model-driven :func:`build_memory_tools` (``remember`` /
+* the write paths - model-driven :func:`build_memory_tools` (``remember`` /
   ``forget``) and a background :func:`learn` pass that distills durable facts.
 
 Memory is namespaced per ``user_id`` under ``(user_id, "facts")``. Raw chat
@@ -17,8 +17,8 @@ turns are not written to or recalled from long-term memory. The legacy
 older versions. When no ``user_id`` is supplied (anonymous), callers disable
 memory entirely.
 
-Embeddings come from real OpenAI (``OPENAI_API_KEY``); OpenRouter — used for
-chat completion elsewhere — has no embeddings API. When the key is absent the
+Embeddings come from real OpenAI (``OPENAI_API_KEY``); OpenRouter - used for
+chat completion elsewhere - has no embeddings API. When the key is absent the
 store still works, but recall degrades from semantic search to recency listing.
 """
 
@@ -59,7 +59,7 @@ _EPISODES = "episodes"  # legacy cleanup only; new raw chat turns are never stor
 # A user_id is used as the Postgres store's namespace key, which langgraph
 # matches with an *unescaped* SQL ``LIKE '<user_id>.facts%'``. Without this
 # allowlist, a user_id of ``%`` (or ``_``) would be a LIKE wildcard that matches
-# every other user's namespace — a cross-tenant read of all stored memory. The
+# every other user's namespace - a cross-tenant read of all stored memory. The
 # allowlist forbids the wildcards ``%``/``_`` and the namespace separator ``.``
 # (which langgraph rejects in labels anyway), leaving only characters safe as a
 # literal LIKE prefix. Applied at every entry so the store is never queried or
@@ -193,7 +193,7 @@ _store_lock = asyncio.Lock()
 async def setup_store() -> BaseStore:
     """Create (once) and return the process-wide memory store.
 
-    ``AsyncPostgresStore`` when ``DATABASE_URL`` is set — durable + pgvector —
+    ``AsyncPostgresStore`` when ``DATABASE_URL`` is set - durable + pgvector -
     otherwise an in-process ``InMemoryStore``. Idempotent and concurrency-safe;
     the first caller wins. Call once from the app lifespan, or lazily via
     :func:`ensure_store`.
@@ -251,7 +251,7 @@ async def close_store() -> None:
 
 
 def store_status() -> dict[str, Any]:
-    """Report the active memory backend — for /health and prod verification.
+    """Report the active memory backend - for /health and prod verification.
 
     Cheap and side-effect free: never triggers store setup or touches the DB, so
     a health check stays fast and doesn't fail when the DB is unreachable. Before
@@ -405,8 +405,8 @@ async def _search(
 def _eviction_order(item: SearchItem) -> tuple[bool, datetime]:
     """Sort key for cap eviction: items to drop first sort first.
 
-    Auto-extracted facts are evicted before explicit `remember` saves — a fact
-    the user asked us to keep is the last thing we drop — and oldest first
+    Auto-extracted facts are evicted before explicit `remember` saves - a fact
+    the user asked us to keep is the last thing we drop - and oldest first
     within each group.
     """
     explicit = item.value.get("source") == "tool"
@@ -560,7 +560,7 @@ async def forget(store: BaseStore, user_id: str, query: str) -> str:
 
     With semantic search available, a weak best match (below the forget floor)
     is treated as "nothing to remove". Without an index, a keyword-overlap
-    matcher stands in — so in either mode an unrelated request never deletes an
+    matcher stands in - so in either mode an unrelated request never deletes an
     arbitrary fact.
     """
     namespace = (user_id, _FACTS)
@@ -590,7 +590,7 @@ class _RememberArgs(BaseModel):
         description=(
             "One concise, durable fact about the user worth remembering in "
             "future chats (a stable preference, identity, or ongoing context) "
-            "— not transient details about the current question."
+            "- not transient details about the current question."
         ),
     )
 
@@ -605,7 +605,7 @@ class _ForgetArgs(BaseModel):
 def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
     """Model-callable remember/forget tools bound to one user's namespace.
 
-    The model never sees or supplies ``user_id`` — it is captured in the closure
+    The model never sees or supplies ``user_id`` - it is captured in the closure
     so the tools cannot be steered to read or write another user's memory. An
     unsafe ``user_id`` yields no tools (memory disabled for that turn).
     """
