@@ -18,13 +18,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import UserInput, run_agent, stream_agent_response
+from agent.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
 
 app = FastAPI()
 
-# CORS only governs browser JS calling this API from another origin; it does
-# nothing against direct (curl/script/server) requests, which is why
-# AGENT_SHARED_SECRET below is the actual access boundary. This just stops a
-# malicious page from riding a visitor's browser to hit the API client-side.
+# CORS only restrains browser JS from other origins. AGENT_SHARED_SECRET
+# below is the real access boundary for direct requests.
 _allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "https://cmugpt.com").split(",")
@@ -37,10 +36,9 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
-# to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
-# auth is skipped (local dev). The HTTPBearer scheme has auto_error=False so
-# we can return our own structured error envelope.
+# Optional shared-secret auth. With AGENT_SHARED_SECRET set, /agent/respond*
+# requires a matching bearer token. auto_error=False keeps our own error
+# envelope.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -150,9 +148,8 @@ def _parse_request(
             detail="'message_history' must be a list if provided.",
         )
     if isinstance(message_history, list):
-        # Accept user/assistant/system at the boundary; the agent strips
-        # `system` defensively. Surface clients keep `system` rows in their
-        # DB schema, so rejecting them here would break production.
+        # Surface clients store system rows, so rejecting them would break
+        # production. The agent strips system turns defensively.
         valid_history = all(
             isinstance(item, Mapping)
             and item.get("role") in ("user", "assistant", "system")
@@ -172,6 +169,21 @@ def _parse_request(
     return user_input, model, message_history, _parse_disabled_tools(payload)
 
 
+def _enforce_daily_token_limit(user_input: UserInput) -> None:
+    """Reject with 429 once the user's daily budget is spent.
+
+    Checked before any model call. The streaming endpoint has already sent
+    200 by the time its generator runs, so it cannot signal this itself.
+    """
+    try:
+        ensure_within_daily_limit(user_input.user_id)
+    except DailyTokenLimitExceeded as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+
+
 @app.get("/api/health")
 async def health() -> JSONResponse:
     return JSONResponse(content={"status": "ok"}, status_code=HTTPStatus.OK)
@@ -188,11 +200,12 @@ async def agent_respond(request: Request) -> JSONResponse:
         ) from exc
 
     user_input, model, message_history, disabled_tools = _parse_request(payload)
+    _enforce_daily_token_limit(user_input)
 
     try:
         agent_response = await run_agent(
             user_input=user_input,
-            model=model or "openai/gpt-5.4-mini",
+            model=model or "openai/gpt-5.6-luna",
             message_history=message_history,
             disabled_tools=disabled_tools,
         )
@@ -235,12 +248,13 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         ) from exc
 
     user_input, model, message_history, disabled_tools = _parse_request(payload)
+    _enforce_daily_token_limit(user_input)
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
             async for event_name, data in stream_agent_response(
                 user_input=user_input,
-                model=model or "openai/gpt-5.4-mini",
+                model=model or "openai/gpt-5.6-luna",
                 message_history=message_history,
                 disabled_tools=disabled_tools,
             ):

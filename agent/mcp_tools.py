@@ -1,20 +1,18 @@
 """MCP tool loading via langchain-mcp-adapters.
 
-Replaces the hand-rolled `mcp` client wiring. `MultiServerMCPClient.get_tools()`
-returns self-contained LangChain `BaseTool` objects: each tool opens its own
-streamable-HTTP session on invocation, so there is no long-lived session to
-manage across a graph run.
+Each `BaseTool` from `MultiServerMCPClient.get_tools()` opens its own
+streamable-HTTP session on invocation, so no session outlives a graph run.
+The graph wraps tool results itself (see `agent/graph.py`) because tool
+output is untrusted data.
 
-The agent treats tool output as untrusted data, so the graph wraps results
-itself (see `agent/graph.py`) rather than letting the prebuilt ToolNode pass
-raw content straight to the model.
-
-Tools are grouped by the service they come from so the Surface can offer one
-on/off switch per service. Disabling a group removes its tools before they ever
-reach the model (see `filter_tools`).
+Tools are grouped by service. The Surface switches groups off per user
+(`filter_tools`) and the agent narrows each request to the groups the query
+needs (`select_tools_for_query`) since every bound schema costs input tokens
+on every model pass.
 """
 
 import os
+import re
 from collections.abc import Iterable
 
 from dotenv import load_dotenv
@@ -34,6 +32,86 @@ TOOL_GROUP_LABELS: dict[str, str] = {
     "eats": "CMUEats",
     "guide": "CMU Guide",
 }
+
+# Query signals per tool group. When nothing matches, every group stays
+# bound, so a missed keyword can never cost the model a tool it needed.
+_GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
+    "eats": re.compile(
+        r"\b("
+        r"din(?:e|es|ing)|food|eat(?:s|ing|ery|eries)?|hungry|breakfast|"
+        r"lunch|dinner|brunch|coffee|cafes?|snacks?|menus?|cuisine|pizza|"
+        r"restaurants?|meals?|drinks?|boba|dessert"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    "courses": re.compile(
+        r"\b("
+        r"courses?|class(?:es)?|prereq\w*|requisites?|professors?|"
+        r"instructors?|units?|gen(?:\s|-)?eds?|syllabus|semester|schedules?|"
+        r"lectures?|recitations?|\d{2}-\d{3}"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    "maps": re.compile(
+        r"\b("
+        r"where|maps?|directions?|routes?|paths?|walk\w*|navigat\w*|"
+        r"buildings?|located|locations?|distance|near(?:by|est)?|closest|"
+        r"get\s+to|go\s+to|from"
+        r")\b",
+        re.IGNORECASE,
+    ),
+    "guide": re.compile(
+        r"\b("
+        r"dorms?|housing|meal\s+plans?|leave\s+of\s+absence|transfer\w*|"
+        r"majors?|minors?|accommodations?|advisors?|advising|polic(?:y|ies)|"
+        r"guide|handbook|orientation|registration|enroll\w*|insurance|"
+        r"shuttle|bus"
+        r")\b",
+        re.IGNORECASE,
+    ),
+}
+
+# Args blocks stay because parameter conventions live only there. The
+# trailing Returns prose adds nothing the model needs.
+_RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*")
+
+
+def condense_tool_description(description: str | None) -> str:
+    if not description:
+        return ""
+    condensed = _RETURNS_PARAGRAPH_RE.sub("", description)
+    return re.sub(r"\n{3,}", "\n\n", condensed).strip()
+
+
+def select_tools_for_query(
+    tools: list[BaseTool],
+    query: str,
+    history_texts: Iterable[str] | None = None,
+) -> list[BaseTool]:
+    """Narrow the bound toolset to the groups the query plausibly needs.
+
+    A query with no group signal falls back to recent user turns, so
+    follow-ups keep the groups the conversation was using. With no signal
+    anywhere every tool stays bound, so narrowing can only save tokens,
+    never remove a capability. Ungrouped tools are always kept.
+    """
+    matched = {
+        group for group, hint in _GROUP_HINT_RES.items() if hint.search(query or "")
+    }
+    if not matched:
+        for text in history_texts or []:
+            matched.update(
+                group
+                for group, hint in _GROUP_HINT_RES.items()
+                if isinstance(text, str) and hint.search(text)
+            )
+    if not matched:
+        return list(tools)
+    return [
+        tool
+        for tool in tools
+        if (group := tool_group(tool.name or "")) is None or group in matched
+    ]
 
 
 def tool_group(tool_name: str) -> str | None:
@@ -75,7 +153,7 @@ def filter_tools(
 ) -> list[BaseTool]:
     """Drop every tool belonging to a disabled group.
 
-    The model never learns the dropped tools exist: they are left out of the
+    The model never learns the dropped tools exist. They are left out of the
     prompt catalog and out of `bind_tools`, so it has no schema to call them
     with. The tools node is built from the same filtered list, so a call
     smuggled in through conversation history resolves to "not available".
@@ -87,8 +165,7 @@ def filter_tools(
 
 
 def _server_url() -> str:
-    # Read at call time so import order (relative to dotenv loading) and any
-    # runtime env changes are always respected.
+    # Read at call time so dotenv order and runtime env changes are respected.
     return os.getenv("MCP_SERVER_URL", "")
 
 
@@ -114,7 +191,11 @@ async def load_mcp_tools() -> list[BaseTool]:
         return []
     try:
         client = _build_client(url)
-        return await client.get_tools()
+        tools = await client.get_tools()
     except Exception:
-        # MCP unavailable: continue without tools rather than failing the turn.
+        # Continue without tools rather than failing the turn.
         return []
+    # Condensing here reaches the prompt catalog and the bound schemas.
+    for tool in tools:
+        tool.description = condense_tool_description(tool.description)
+    return tools

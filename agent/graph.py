@@ -1,19 +1,19 @@
 """LangGraph implementation of the CMUGPT agent.
 
-A single compiled `StateGraph` is the one source of truth for both the
-non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
-endpoints. The model emits plain Markdown; deterministic nodes compute
-`cmu_maps`, `services_used`, and `thought` into graph state.
+A single compiled `StateGraph` backs both the non-streaming (`/agent/respond`)
+and streaming (`/agent/respond/stream`) HTTP endpoints. The model emits plain
+Markdown while deterministic nodes compute `cmu_maps`, `services_used`, and
+`thought` into graph state.
 
-Graph shape: ``START -> agent``; from ``agent`` either ``-> tools -> agent``
-(when the model requested tool calls) or ``-> postprocess -> END`` (final
-answer).
+The graph runs ``START -> agent``, then either ``agent -> tools -> agent``
+when the model requested tool calls or ``agent -> postprocess -> END`` for a
+final answer.
 
-Streaming is done with LangGraph's custom stream channel: nodes emit typed
-events through the injected `writer`, and the public entrypoints forward them as
+Streaming uses LangGraph's custom stream channel. Nodes emit typed events
+through the injected `writer` and the public entrypoints forward them as
 ``(event_name, data)`` tuples matching the existing SSE contract
-(``status`` / ``map`` / ``delta`` / ``done`` / ``error``). When the graph is run
-non-streaming via ``ainvoke`` the writes are simply dropped.
+(``status`` / ``map`` / ``delta`` / ``done`` / ``error``). A non-streaming
+``ainvoke`` run simply drops the writes.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from __future__ import annotations
 import operator
 import os
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
@@ -45,15 +46,37 @@ from .guards import (
     compute_thought,
     should_require_tool,
 )
-from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
+from .mcp_tools import (
+    filter_tools,
+    load_mcp_tools,
+    normalize_disabled_groups,
+    select_tools_for_query,
+)
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
+from .token_limits import record_usage
 
 load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 StreamEvent = tuple[str, dict[str, Any]]
+
+# The whole history is billed on every model pass. Twelve messages keeps six
+# exchanges, enough for normal follow-ups.
+_HISTORY_MAX_MESSAGES = 12
+_HISTORY_MAX_MESSAGE_CHARS = 3000
+
+# Narrowing reads recent user turns only. Assistant turns repeat tool data
+# wholesale and would match everything.
+_HISTORY_HINT_TURNS = 4
+
+# Tool results are resent on every later pass. The marker keeps the model
+# from presenting a truncated list as complete.
+_TOOL_RESULT_MAX_CHARS = 6000
+_TOOL_RESULT_TRUNCATION_MARKER = (
+    "\n[Result truncated. More entries exist beyond this point.]"
+)
 
 
 class AgentState(TypedDict):
@@ -66,10 +89,11 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
-    # Tool groups the user switched off in the Surface. Their tools are already
-    # gone from the bound tool list; postprocess reads this to keep the
-    # deterministic CMU Maps embed off too.
+    # Tool groups the user switched off in the Surface. Their tools are
+    # already unbound. Postprocess reads this to keep the map embed off too.
     disabled_tools: list[str]
+    # Owner of the daily token budget for this run.
+    user_id: str
 
 
 def _api_key() -> str:
@@ -81,6 +105,9 @@ def _make_chat_model(model: str) -> ChatOpenAI:
         model=model,
         api_key=SecretStr(_api_key()),
         base_url=OPENROUTER_BASE_URL,
+        # Report usage on the final stream chunk so the budget counts real
+        # usage instead of estimates.
+        stream_usage=True,
     )
 
 
@@ -115,20 +142,38 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
     )
 
 
+def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
+    """Charge one model pass to the user's daily budget.
+
+    Falls back to a chars/4 estimate so the budget stays enforceable when
+    the stream carries no usage metadata.
+    """
+    usage = getattr(gathered, "usage_metadata", None)
+    if usage and usage.get("total_tokens"):
+        total = int(usage["total_tokens"])
+    else:
+        input_chars = sum(len(_message_text(m)) for m in state["messages"])
+        total = (input_chars + len(_message_text(gathered))) // 4
+    # Budget accounting must never break an answer in flight.
+    with suppress(Exception):
+        record_usage(state.get("user_id"), total)
+
+
+def _truncate_tool_result(result: str) -> str:
+    if len(result) <= _TOOL_RESULT_MAX_CHARS:
+        return result
+    return result[:_TOOL_RESULT_MAX_CHARS] + _TOOL_RESULT_TRUNCATION_MARKER
+
+
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
-        # `tool_choice="required"` stops the model answering CMU data questions
-        # from memory, but it forces *some* call from whatever is left bound. Once
-        # the user has switched a group off, the tool that would have served the
-        # question may be gone, and forcing then picks an unrelated one: a wasted
-        # call that also lands in `services_used` and misreports how the answer
-        # was sourced. So only force while the full toolset is available; the
-        # prompt still tells the model to use what it has and to say when a tool
-        # is off.
+        # Forcing a tool call while a group is switched off can pick an
+        # unrelated tool and misreport sources, so only force when nothing
+        # is disabled.
         force_tool = (
             bool(tools)
             and not normalize_disabled_groups(state.get("disabled_tools"))
@@ -137,14 +182,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         )
         runnable = bound_required if force_tool else bound
 
-        # Buffer (don't live-stream) these passes so postprocess can repair the
-        # text before the user sees it:
-        #   * forced tool passes: prose here (e.g. an "I couldn't find a route"
-        #     preamble) is not the final answer.
-        #   * map queries: the model sometimes falsely claims it couldn't look
-        #     up locations even though we have a working map; we strip that out
-        #     in postprocess, so it must not stream live. With CMUMaps switched
-        #     off there is no map to contradict, so nothing needs repairing.
+        # Buffer passes postprocess may rewrite. Forced-pass preamble is not
+        # the final answer, and map queries can draw a false failure claim
+        # that postprocess strips before the user sees it.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
@@ -163,6 +203,8 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
         if gathered is None:
             gathered = AIMessageChunk(content="")
+
+        _record_pass_usage(state, gathered)
 
         final_message = AIMessage(
             content=gathered.content,
@@ -207,15 +249,17 @@ def _build_tools_node(tools: list[BaseTool]):
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     result = f"Tool '{name}' failed: {exc}"
 
+            # Keep the full result for postprocess and map inference. Only
+            # the copy resent to the model is capped.
             new_invocations.append({"name": name, "arguments": args, "result": result})
             if name not in state["services_used"] and name not in new_services:
                 new_services.append(name)
 
-            # Wrap tool output so the model treats it as untrusted DATA, not as
-            # instructions. Defense against prompt-injection from MCP content.
+            # Wrapped so the model treats tool output as untrusted data,
+            # never as instructions.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{result}\n"
+                f"{_truncate_tool_result(result)}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -253,17 +297,16 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    # A switched-off CMUMaps means no map embed either, not just no map tools:
-    # the guard below is what attaches the deterministic map to the answer.
+    # CMUMaps switched off means no map embed either, not just no map tools.
+    # The guard below is what attaches the map to the answer.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
-    # When the answer was buffered (forced tool pass or a map query), it hasn't
-    # been streamed yet - emit the repaired text now so the user only ever sees
-    # the corrected version.
+    # A buffered answer (forced tool pass or map query) has not streamed yet.
+    # Emit the repaired text now so the user only sees the corrected version.
     if not state.get("streamed") and parsed.response_text:
         writer({"event": "delta", "data": {"text": parsed.response_text}})
 
@@ -283,15 +326,14 @@ def _route_after_agent(state: AgentState) -> str:
 
 
 def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = True):
-    """Compile the agent graph for one request (model + tools captured).
+    """Compile the agent graph for one request (model and tools captured).
 
-    `tools` must already have the user's disabled groups filtered out: the
+    `tools` must already have the user's disabled groups filtered out. The
     agent node binds exactly this list, so anything missing here is uncallable.
     """
-    # ty doesn't yet structurally match TypedDict's synthesized __required_keys__/
-    # __optional_keys__ against langgraph's StateLike protocol (confirmed still
-    # failing on ty 0.0.65); AgentState is a plain TypedDict, the canonical shape
-    # LangGraph expects here.
+    # ty does not yet structurally match TypedDict against langgraph's
+    # StateLike protocol (still failing on ty 0.0.65). AgentState is a plain
+    # TypedDict, the canonical shape LangGraph expects here.
     graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
     graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
     graph.add_node("tools", _build_tools_node(tools))
@@ -308,27 +350,48 @@ def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = T
     return graph.compile()
 
 
+def _cap_history_text(content: str) -> str:
+    if len(content) <= _HISTORY_MAX_MESSAGE_CHARS:
+        return content
+    # Keep the head. Answers front-load the substance follow-ups reference.
+    return content[:_HISTORY_MAX_MESSAGE_CHARS] + "\n[earlier turn truncated]"
+
+
 def _sanitize_history(
     message_history: list[dict[str, str]] | None,
 ) -> list[AnyMessage]:
-    """Convert caller history to LangChain messages, dropping non user/assistant.
+    """Convert caller history to LangChain messages, capped and sanitized.
 
-    We own the system prompt; smuggled `system`/`tool` turns are an injection
-    vector, so only `user` and `assistant` turns are carried over.
+    Smuggled system or tool turns are an injection vector, so only user and
+    assistant turns carry over. Turns past the cap are dropped for cost.
     """
     if not message_history:
         return []
     out: list[AnyMessage] = []
-    for turn in message_history:
+    for turn in message_history[-_HISTORY_MAX_MESSAGES:]:
         role = turn.get("role")
         content = turn.get("content")
         if not isinstance(content, str):
             continue
         if role == "user":
-            out.append(HumanMessage(content=content))
+            out.append(HumanMessage(content=_cap_history_text(content)))
         elif role == "assistant":
-            out.append(AIMessage(content=content))
+            out.append(AIMessage(content=_cap_history_text(content)))
     return out
+
+
+def _history_hint_texts(
+    message_history: list[dict[str, str]] | None,
+) -> list[str]:
+    """Recent user turns that feed tool-group narrowing."""
+    if not message_history:
+        return []
+    texts = [
+        turn.get("content")
+        for turn in message_history
+        if turn.get("role") == "user" and isinstance(turn.get("content"), str)
+    ]
+    return [text for text in texts[-_HISTORY_HINT_TURNS:] if isinstance(text, str)]
 
 
 def _initial_state(
@@ -350,29 +413,37 @@ def _initial_state(
         streamed=False,
         response_payload={},
         disabled_tools=list(disabled_tools or []),
+        user_id=user_input.user_id or "",
     )
 
 
 async def _prepare_run(
     model: str,
     disabled_tools: list[str] | None,
+    query: str,
+    message_history: list[dict[str, str]] | None,
 ) -> tuple[Any, list[BaseTool]]:
-    """Load tools, drop the user's disabled groups, and compile the graph."""
+    """Load tools, narrow them to the query, and compile the graph.
+
+    Narrowing runs after the disabled-group filter so a keyword match can
+    never re-bind a switched-off group.
+    """
     tools = filter_tools(await load_mcp_tools(), disabled_tools)
+    tools = select_tools_for_query(tools, query, _history_hint_texts(message_history))
     maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
     return build_graph(_make_chat_model(model), tools, maps_enabled), tools
 
 
 async def run_agent(
     user_input: UserInput,
-    model: str = "openai/gpt-5.4-mini",
+    model: str = "openai/gpt-5.6-luna",
     message_history: list[dict[str, str]] | None = None,
     disabled_tools: list[str] | None = None,
 ) -> AgentResponse:
     """Non-streaming entry point. Runs the graph and returns the full response.
 
-    `disabled_tools` lists the tool groups the user switched off in the Surface
-    (`maps`, `courses`, `eats`, `guide`); those tools are never bound.
+    `disabled_tools` lists the groups the user switched off in the Surface.
+    Those tools are never bound.
     """
     if not _api_key():
         return _fallback_response(
@@ -380,7 +451,9 @@ async def run_agent(
             confidence=0.2,
         )
 
-    graph, tools = await _prepare_run(model, disabled_tools)
+    graph, tools = await _prepare_run(
+        model, disabled_tools, user_input.query, message_history
+    )
     final = await graph.ainvoke(
         _initial_state(user_input, message_history, tools, disabled_tools)
     )
@@ -401,7 +474,7 @@ async def stream_agent_response(
     message_history: list[dict[str, str]] | None,
     disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    """Streaming entry point: yields ('delta', ...) ... ('done', ...) events."""
+    """Streaming entry point. Yields ('delta', ...) through ('done', ...)."""
     if not _api_key():
         fb = _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
@@ -411,7 +484,9 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    graph, tools = await _prepare_run(model, disabled_tools)
+    graph, tools = await _prepare_run(
+        model, disabled_tools, user_input.query, message_history
+    )
 
     async for chunk in graph.astream(
         _initial_state(user_input, message_history, tools, disabled_tools),
