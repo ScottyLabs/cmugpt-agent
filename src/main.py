@@ -8,6 +8,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
@@ -19,6 +20,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent import UserInput, run_agent, stream_agent_response
 
 app = FastAPI()
+
+# CORS only governs browser JS calling this API from another origin; it does
+# nothing against direct (curl/script/server) requests, which is why
+# AGENT_SHARED_SECRET below is the actual access boundary. This just stops a
+# malicious page from riding a visitor's browser to hit the API client-side.
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "https://cmugpt.com").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 # Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
 # to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
