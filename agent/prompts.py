@@ -1,21 +1,21 @@
 """System prompt construction for the CMUGPT agent.
 
-The model now produces plain GitHub-flavored Markdown (no JSON envelope). The
-agent computes `cmu_maps`, `services_used`, and `thought` deterministically in
-graph nodes, so the prompt no longer instructs the model to emit any structured
-output. All safety, scope, anti-hallucination, and tool-transparency rules are
-preserved verbatim.
+The model produces plain GitHub flavored Markdown with no JSON envelope and
+proposes the campus map through the maps_show_map tool. Graph nodes compute
+cmu_maps, services_used, and thought deterministically, so the prompt never
+asks the model for structured output.
 """
 
 from collections.abc import Iterable
 
 from langchain_core.tools import BaseTool
 
+from .buildings import CURATED_NICKNAMES, LOCATION_ID_TO_LABEL
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups
 
-# Substrings that mark a tool as capable of returning a route/path between two
-# points (as opposed to merely locating a single building). Matched against tool
-# names so the prompt can adapt to whatever the MCP server actually exposes.
+# Substrings marking a tool as able to return a route between two points
+# rather than locate one building. Matched against tool names so the prompt
+# adapts to whatever the MCP server exposes.
 _ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
 
 
@@ -27,14 +27,11 @@ def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
 
 
 def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
-    """Directions guidance, tailored to whether a routing tool is available.
+    """Directions guidance tailored to routing tool availability.
 
-    Without a routing tool the model cannot compute a real route, so it must not
-    invent turn-by-turn steps or claim a lookup failed - the deterministic map
-    attached to the answer is the source of truth for the route.
-
-    With CMUMaps switched off there is no map at all: nothing is attached to the
-    answer, so the model must not promise one.
+    Without a routing tool the model cannot compute a route and must not
+    invent steps or claim a failed lookup, the attached map is the source
+    of truth. With CMUMaps off there is no map and none may be promised.
     """
     if not maps_enabled:
         return (
@@ -52,31 +49,71 @@ def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
             "## Directions and campus navigation\n"
             "When the user asks how to get from one campus location to another, "
             "call the routing/path tool and base a short numbered list of "
-            "walking steps on the route it returns. An interactive campus map "
-            "of that route is attached to your answer automatically, so point "
-            "the user to it. Do NOT fabricate precise distances or times you "
-            "cannot derive from the tool.\n"
+            "walking steps on the route it returns. Also call `maps_show_map` "
+            "with the origin and destination so the map attached to your "
+            "answer shows that route; point the user to it. Do NOT fabricate "
+            "precise distances or times you cannot derive from the tool.\n"
         )
     return (
         "## Directions and campus navigation\n"
         "You do NOT have a routing or turn-by-turn directions tool, so you "
         "cannot compute an exact walking route. When the user asks how to get "
         "somewhere: do NOT invent step-by-step turns, distances, or times, and "
-        "do NOT say that a lookup or data retrieval failed - it did not. An "
-        "interactive campus map of the route is attached to your answer "
-        "automatically; point the user to it and tell them to follow the "
-        "highlighted path. You may add one or two sentences of general "
-        "orientation (overall direction or a nearby landmark) only if you are "
-        "confident from general knowledge, and say it is approximate.\n"
+        "do NOT say that a lookup or data retrieval failed - it did not. Call "
+        "`maps_show_map` with the origin and destination: the interactive "
+        "campus map it attaches to your answer is the route. Point the user "
+        "to it and tell them to follow the highlighted path. You may add one "
+        "or two sentences of general orientation (overall direction or a "
+        "nearby landmark) only if you are confident from general knowledge, "
+        "and say it is approximate.\n"
+    )
+
+
+def _campus_map_section(maps_enabled: bool) -> str:
+    """Rules for the model's map decision, plus the building catalog.
+
+    The model decides when a map belongs on the answer and which buildings it
+    shows by calling maps_show_map. The catalog lets it translate what the
+    user actually said into a real code. The tool schema and the postprocess
+    guard both reject codes outside the list.
+    """
+    if not maps_enabled:
+        return ""
+    catalog = "\n".join(
+        f"{code} - {name}" for code, name in sorted(LOCATION_ID_TO_LABEL.items())
+    )
+    nicknames = "; ".join(f"'{alias}' = {code}" for alias, code in CURATED_NICKNAMES)
+    return (
+        "## Campus map (maps_show_map)\n"
+        "YOU decide when an interactive campus map is attached to your answer "
+        "by calling `maps_show_map`.\n"
+        "- Call it whenever the user asks where something is, how to get "
+        "somewhere, what is near a place, or sends just a campus place name.\n"
+        "- `destination` is the place the user is asking about. Set `origin` "
+        "ONLY when the user stated or clearly implied a starting point, "
+        "possibly in an earlier message ('I'm at Gates...', 'from my dorm' "
+        "when they said which dorm before). Never guess an origin.\n"
+        "- Use ONLY codes from the list below. For a spot inside or right by "
+        "a building, use that building's code. If the place is off campus or "
+        "no code fits, do not call the tool - never force a wrong building.\n"
+        "- The map is display only: it returns no data, so keep calling data "
+        "tools for hours, menus, rooms, and courses as usual.\n"
+        "- Do not paste map URLs into your prose; the map embeds "
+        "automatically below your answer.\n"
+        "\n"
+        "Campus buildings (code - name):\n"
+        f"{catalog}\n"
+        f"Common campus nicknames: {nicknames}.\n"
+        "\n"
     )
 
 
 def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
     """Tell the model which tool groups the user switched off, if any.
 
-    The tools themselves are already gone from the catalog and from the model's
-    bound schemas, so this section only exists so the model can explain *why* it
-    cannot look something up instead of guessing at the data.
+    The tools are already gone from the catalog and the bound schemas. This
+    section only lets the model explain why it cannot look something up
+    instead of guessing at the data.
     """
     labels = disabled_group_labels(disabled_tools)
     if not labels:
@@ -115,6 +152,7 @@ def build_system_prompt(
 
     maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
     directions_section = _directions_section(_has_routing_tool(tools), maps_enabled)
+    campus_map_section = _campus_map_section(maps_enabled)
     disabled_section = _disabled_tools_section(disabled_tools)
 
     return (
@@ -209,6 +247,7 @@ def build_system_prompt(
         "\n"
         f"{directions_section}"
         "\n"
+        f"{campus_map_section}"
         "## Tool-use policy (critical)\n"
         f"{tool_catalog}\n"
         "\n"

@@ -2,8 +2,10 @@
 
 A single compiled `StateGraph` is the one source of truth for both the
 non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
-endpoints. The model emits plain Markdown; deterministic nodes compute
-`cmu_maps`, `services_used`, and `thought` into graph state.
+endpoints. The model emits plain Markdown and proposes the campus map by
+calling the local maps_show_map tool. Deterministic nodes validate that
+proposal, fall back to query inference, and compute cmu_maps, services_used,
+and thought into graph state.
 
 Graph shape: ``START -> agent``; from ``agent`` either ``-> tools -> agent``
 (when the model requested tool calls) or ``-> postprocess -> END`` (final
@@ -39,12 +41,13 @@ from langgraph.graph.message import add_messages
 from langgraph.types import StreamWriter
 from pydantic import SecretStr
 
-from .cmu_maps import _apply_cmu_maps_guard, query_has_map_intent
+from .cmu_maps import SHOW_MAP_TOOL_NAME, _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
     apply_tool_transparency_guard,
     compute_thought,
     should_require_tool,
 )
+from .map_tool import build_show_map_tool
 from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
@@ -66,9 +69,8 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
-    # Tool groups the user switched off in the Surface. Their tools are already
-    # gone from the bound tool list; postprocess reads this to keep the
-    # deterministic CMU Maps embed off too.
+    # Tool groups the user switched off in the Surface. Their tools are
+    # already unbound. Postprocess reads this to keep the map embed off too.
     disabled_tools: list[str]
 
 
@@ -137,14 +139,11 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         )
         runnable = bound_required if force_tool else bound
 
-        # Buffer (don't live-stream) these passes so postprocess can repair the
-        # text before the user sees it:
-        #   * forced tool passes: prose here (e.g. an "I couldn't find a route"
-        #     preamble) is not the final answer.
-        #   * map queries: the model sometimes falsely claims it couldn't look
-        #     up locations even though we have a working map; we strip that out
-        #     in postprocess, so it must not stream live. With CMUMaps switched
-        #     off there is no map to contradict, so nothing needs repairing.
+        # Buffer these passes so postprocess can repair the text before the
+        # user sees it. Forced tool passes produce preamble prose that is not
+        # the final answer. Map queries sometimes draw a false failure claim
+        # that postprocess strips, so they must not stream live. With CMUMaps
+        # off there is no map to contradict and nothing needs buffering.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
@@ -208,7 +207,14 @@ def _build_tools_node(tools: list[BaseTool]):
                     result = f"Tool '{name}' failed: {exc}"
 
             new_invocations.append({"name": name, "arguments": args, "result": result})
-            if name not in state["services_used"] and name not in new_services:
+            # maps_show_map is presentation, not a data source. It stays in
+            # tool_invocations for the guard but out of the services the
+            # Surface reports as answer sources.
+            if (
+                name != SHOW_MAP_TOOL_NAME
+                and name not in state["services_used"]
+                and name not in new_services
+            ):
                 new_services.append(name)
 
             # Wrap tool output so the model treats it as untrusted DATA, not as
@@ -253,8 +259,8 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    # A switched-off CMUMaps means no map embed either, not just no map tools:
-    # the guard below is what attaches the deterministic map to the answer.
+    # CMUMaps switched off means no map embed either, not just no map tools.
+    # The guard below is what attaches the map to the answer.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
@@ -360,6 +366,11 @@ async def _prepare_run(
     """Load tools, drop the user's disabled groups, and compile the graph."""
     tools = filter_tools(await load_mcp_tools(), disabled_tools)
     maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
+    if maps_enabled:
+        # Appended after filtering so a disabled maps group never sees it.
+        # Membership in tools covers the prompt catalog, the bound schemas,
+        # and the tools node, like any MCP tool.
+        tools = [*tools, build_show_map_tool()]
     return build_graph(_make_chat_model(model), tools, maps_enabled), tools
 
 

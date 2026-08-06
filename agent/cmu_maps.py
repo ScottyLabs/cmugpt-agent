@@ -1,9 +1,11 @@
-"""Deterministic CMU Maps inference.
+"""Deterministic CMU Maps validation and fallback inference.
 
-Extracts CMU Maps building/room IDs and builds embeddable map URLs from the
-user's query and any tool invocations made during the turn. This is pure,
-framework-agnostic logic: it never calls the LLM, so the agent's map links stay
-deterministic and unit-testable regardless of the model used.
+The model's maps_show_map call (agent/map_tool.py) is the primary source of
+the map attached to an answer, since the model reads phrasing and history no
+pattern list can. This module is the deterministic layer around that decision.
+It validates the model's codes against the catalog, builds the URL, and falls
+back to regex inference over the latest query when the tool was not called.
+Pure framework free logic with no LLM calls, unit testable under any model.
 """
 
 import re
@@ -20,16 +22,22 @@ from .schema import AgentResponse, CmuMaps
 
 CMU_MAPS_BASE_URL = "https://maps.scottylabs.org"
 
+# Local presentation tool the model calls to attach a map. The maps_ prefix
+# puts it under the existing CMUMaps group toggle.
+SHOW_MAP_TOOL_NAME = "maps_show_map"
+
 CMU_MAPS_QUERY_RE = re.compile(
     r"\b("
-    r"where|located|location|directions?|route|path|map|walk|walking|"
-    r"get\s+to|go\s+to|from|between"
+    # The wheres alternative covers the apostrophe free typo, which a bare
+    # word boundary match on where cannot reach.
+    r"where'?s?|located|location|directions?|route|path|map|walk|walking|"
+    r"get\s+to|go\s+to|take\s+me|show\s+me|navigate|how\s+far|from|between"
     r")\b",
     re.IGNORECASE,
 )
 
-# `KNOWN_CMU_LOCATIONS` (alias -> code/name) and `LOCATION_ID_TO_LABEL`
-# (code -> name) are derived from buildings.json by agent/buildings.py.
+# KNOWN_CMU_LOCATIONS maps aliases to codes and names, LOCATION_ID_TO_LABEL
+# maps codes to names. Both derive from buildings.json in agent/buildings.py.
 LOCATION_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,4}\b")
 PAREN_LOCATION_RE = re.compile(
     r"(?P<label>[A-Z][A-Za-z0-9 '&.-]{1,80})\s*\((?P<id>[A-Z0-9]{2,5})\)"
@@ -47,9 +55,8 @@ MAP_FAILURE_CLAIM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Sentences that push the user to an external map/site for directions. When we
-# have our own embeddable map, these recommendations are wrong, so the repair
-# step drops them.
+# Sentences that send the user to an external map or site for directions.
+# The repair step drops them because an embedded map is already attached.
 EXTERNAL_MAP_REDIRECT_RE = re.compile(
     r"\b(official\s+cmu\s+website|cmu\.edu|google\s+maps?)\b",
     re.IGNORECASE,
@@ -89,10 +96,9 @@ def _location_from_text(text: str | None) -> tuple[str, str | None] | None:
         if re.search(rf"\b{re.escape(alias)}\b", lowered):
             return loc_id, label
 
-    # Bare uppercase tokens are only treated as building IDs when they are known
-    # CMU Maps IDs. Without this guard, arbitrary capitalized words in free text
-    # (e.g. "DAN", "SIO") would be mistaken for locations and could hijack the
-    # answer with a bogus map/directions override.
+    # Bare uppercase tokens count as building IDs only when the catalog knows
+    # them, otherwise arbitrary capitalized words in free text would hijack
+    # the answer with a bogus map.
     explicit_id = LOCATION_ID_RE.search(cleaned)
     if explicit_id:
         loc = _location_from_id(explicit_id.group(0))
@@ -132,6 +138,16 @@ def _direction_locations_from_query(
             r"(?P<src>[A-Za-z0-9 '&.-]+?)(?:[?!.,;:]|$)",
             re.IGNORECASE,
         ),
+        # Covers origins stated as the speaker's position, as in I'm at Gates,
+        # how do I get to Baker. The source capture stops at punctuation so it
+        # does not swallow the question.
+        re.compile(
+            r"\b(?:i'?m|i\s+am|we'?re|we\s+are)\s+(?:at|in|near|by)\s+"
+            r"(?P<src>[^,.;?!]+?)[,.;]?\s.*?"
+            r"\b(?:get|go|walk|head|come)\s+(?:over\s+)?to\s+"
+            r"(?P<dest>.+?)(?:[?!.,;:]|$)",
+            re.IGNORECASE,
+        ),
     ]
     for pattern in patterns:
         match = pattern.search(query)
@@ -142,6 +158,34 @@ def _direction_locations_from_query(
         if src and dest:
             return src, dest
     return None
+
+
+# Trailing room number as in Wean 5310. Indoor data sits behind auth, so the
+# room only selects which building to show.
+_ROOM_SUFFIX_RE = re.compile(r"\s+[A-Za-z]?\d{2,4}[A-Za-z]?$")
+_FILLER_RE = re.compile(
+    r"^(?:please|hey|hi|ok(?:ay)?)[\s,]+|[\s,]+(?:please|thanks|thank\s+you)$",
+    re.IGNORECASE,
+)
+
+
+def _bare_location_query(query: str) -> tuple[str, str | None] | None:
+    """Resolve a message that is only a location, such as newell simon hall.
+
+    The intent gate needs a verb, so a bare building name never reaches the
+    target patterns, yet typing only a building is a request to see it. To
+    stay safe without the verb, the whole cleaned message must equal one alias
+    exactly. A location inside a longer sentence still needs explicit intent.
+    """
+    cleaned = _FILLER_RE.sub("", _clean_location_phrase(query))
+    cleaned = _ROOM_SUFFIX_RE.sub("", cleaned).strip()
+    if not cleaned or len(cleaned) < 2:
+        return None
+    lowered = normalize(cleaned)
+    for alias, loc_id, label in KNOWN_CMU_LOCATIONS:
+        if lowered == alias:
+            return loc_id, label
+    return _location_from_id(cleaned)
 
 
 def _target_location_from_query(query: str) -> tuple[str, str | None] | None:
@@ -229,13 +273,49 @@ def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
     return arguments if isinstance(arguments, dict) else {}
 
 
+def _catalog_location(loc_id: Any) -> tuple[str, str | None] | None:
+    """A location only when the id is a code the catalog actually contains."""
+    loc = _location_from_id(loc_id) if isinstance(loc_id, str) else None
+    return loc if loc and loc[0] in LOCATION_ID_TO_LABEL else None
+
+
+def _maps_from_show_map(call: dict[str, Any]) -> CmuMaps | None:
+    """The model's map decision when this call is a valid maps_show_map.
+
+    The tool schema constrains codes, but these args are raw model output
+    recorded before validation, so membership is checked again. A hallucinated
+    code degrades to fallback inference instead of a URL the map rejects.
+    """
+    if call.get("name") != SHOW_MAP_TOOL_NAME:
+        return None
+    args = _tool_arguments(call)
+    dest = _catalog_location(args.get("destination"))
+    if not dest:
+        return None
+    src = _catalog_location(args.get("origin"))
+    if src and src[0] != dest[0]:
+        return _maps_payload_for_directions(src, dest)
+    return _maps_payload_for_location(dest)
+
+
 def _infer_cmu_maps(
     messages: list[dict[str, Any]],
     tool_invocations: list[dict[str, Any]],
 ) -> CmuMaps:
+    # The model's explicit decision outranks everything below, including the
+    # intent gate, since it judges phrasing and history no pattern can. The
+    # latest call wins because the model may correct itself.
+    for call in reversed(tool_invocations):
+        decided = _maps_from_show_map(call)
+        if decided:
+            return decided
+
     query = latest_user_text(messages)
-    if not query or not CMU_MAPS_QUERY_RE.search(query):
+    if not query:
         return CmuMaps()
+    if not CMU_MAPS_QUERY_RE.search(query):
+        bare = _bare_location_query(query)
+        return _maps_payload_for_location(bare) if bare else CmuMaps()
 
     for call in tool_invocations:
         name = call.get("name")
@@ -269,27 +349,26 @@ def _infer_cmu_maps(
 
 
 def query_has_map_intent(query: str) -> bool:
-    """True when the query alone is enough to place a building or route on the map.
+    """True when the query alone can place a building or route on the map.
 
-    Used to decide whether to buffer the model's answer before showing it, so a
-    stray "I couldn't look that up" claim never streams to the user ahead of the
-    deterministic map we already know how to build.
+    Decides whether the answer is buffered, so a false failure claim never
+    streams ahead of a map already known to be buildable.
     """
-    if not query or not CMU_MAPS_QUERY_RE.search(query):
+    if not query:
         return False
+    if not CMU_MAPS_QUERY_RE.search(query):
+        return _bare_location_query(query) is not None
     if _direction_locations_from_query(query):
         return True
     return _target_location_from_query(query) is not None
 
 
 def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
-    """Minimal, route-specific pointer to the map.
+    """Minimal route specific pointer to the map.
 
-    This is a fallback only: the primary directions/answer come from the model,
-    which describes the specific route (and uses the routing tool when it is
-    available). This text is used when the model wrongly claims it could not
-    find a place even though we have a map to show. It references the actual
-    requested locations rather than any hardcoded route.
+    Fallback only, used when the model wrongly claims a place could not be
+    found although a map exists. Names the requested locations rather than any
+    hardcoded route.
     """
     if cmu_maps.mode == "directions":
         src = cmu_maps.src_label or cmu_maps.src or "your starting point"
@@ -309,8 +388,8 @@ def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
 def _strip_false_map_failure(text: str) -> str:
     """Drop lines that falsely claim a failed lookup or push an external map.
 
-    Operates line-by-line so Markdown lists and any real directions survive;
-    only the offending prose lines are removed.
+    Operates line by line so real directions survive. Only the offending prose
+    lines are removed.
     """
     kept: list[str] = []
     for line in text.splitlines():
@@ -338,10 +417,10 @@ def _is_low_value_remainder(text: str) -> bool:
 
 
 def _repair_false_map_failure(text: str, cmu_maps: CmuMaps) -> str:
-    """Swap a false map-failure claim for the correct map pointer.
+    """Swap a false map failure claim for the correct map pointer.
 
-    Keeps any genuinely useful directions the model also produced; falls back to
-    just the pointer when nothing of value remains after scrubbing.
+    Keeps useful directions the model produced and falls back to the pointer
+    alone when nothing of value survives scrubbing.
     """
     success = _cmu_maps_success_text(cmu_maps)
     scrubbed = _strip_false_map_failure(text)
@@ -358,9 +437,8 @@ def _apply_cmu_maps_guard(
     inferred = _infer_cmu_maps(messages, tool_invocations)
     if inferred.url:
         parsed.cmu_maps = inferred
-        # The deterministic map is authoritative. If the model nonetheless
-        # claims it couldn't look up / retrieve the locations, repair the text
-        # so the user never sees a contradiction with the working map.
+        # The validated map is authoritative. If the text still claims the
+        # lookup failed, repair it so the user never sees the contradiction.
         if MAP_FAILURE_CLAIM_RE.search(parsed.response_text or ""):
             parsed.response_text = _repair_false_map_failure(
                 parsed.response_text or "", inferred
