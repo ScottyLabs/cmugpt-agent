@@ -260,6 +260,52 @@ def test_latency_planner_preserves_memory_tools() -> None:
     )
 
 
+def test_data_tool_gate_scans_recent_history() -> None:
+    history = [
+        {"role": "user", "content": "Where is Gates?"},
+        {"role": "assistant", "content": "Gates is on Forbes."},
+    ]
+    assert_true(
+        graph_module._needs_data_tools("what about Wean Hall?", history),
+        "follow-up turn keeps data tools via history",
+    )
+    assert_true(
+        not graph_module._needs_data_tools("what about Wean Hall?", None),
+        "same text without history still skips tools",
+    )
+    small_talk = [{"role": "user", "content": "hello"}]
+    assert_true(
+        not graph_module._needs_data_tools("thanks!", small_talk),
+        "non-data threads still skip tools",
+    )
+
+
+def test_force_latch_counts_memory_tool_rounds() -> None:
+    from langchain_core.messages import (
+        AIMessage,
+        AnyMessage,
+        HumanMessage,
+        ToolMessage,
+    )
+
+    before: list[AnyMessage] = [
+        HumanMessage(content="Remember that I love the Underground.")
+    ]
+    assert_true(
+        not graph_module._had_tool_round(before),
+        "no tool round before the first pass",
+    )
+    after: list[AnyMessage] = [
+        *before,
+        AIMessage(content="", tool_calls=[]),
+        ToolMessage(content="Saved to memory: ...", tool_call_id="call_remember"),
+    ]
+    assert_true(
+        graph_module._had_tool_round(after),
+        "memory-only round releases the force latch",
+    )
+
+
 def test_every_llm_turn_uses_the_canonical_system_prompt() -> None:
     state = graph_module._initial_state(
         UserInput(query="Explain recursion briefly.", user_id="ci-user"),
@@ -445,6 +491,8 @@ def run_tests() -> None:
         test_production_requires_database_and_shared_secret()
         test_latency_planner_keeps_generic_turns_tool_free()
         test_latency_planner_preserves_memory_tools()
+        test_data_tool_gate_scans_recent_history()
+        test_force_latch_counts_memory_tool_rounds()
         test_every_llm_turn_uses_the_canonical_system_prompt()
         test_agent_respond_forwards_disabled_tools(client)
         test_agent_respond_rejects_malformed_disabled_tools(client)

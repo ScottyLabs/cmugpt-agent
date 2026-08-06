@@ -41,7 +41,6 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # marker below, never by name.
 REMEMBER_TOOL = "remember"
 FORGET_TOOL = "forget"
-MEMORY_TOOL_NAMES: frozenset[str] = frozenset({REMEMBER_TOOL, FORGET_TOOL})
 
 # BaseTool.metadata marker set by build_memory_tools. The graph trusts only
 # tools carrying it: an MCP server could publish its own "remember" tool, and

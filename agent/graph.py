@@ -188,12 +188,28 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
     )
 
 
-def _needs_data_tools(query: str) -> bool:
+# Follow-ups like "what about Wean?" rarely repeat a data keyword. Scan the
+# last few user turns too, so a thread that needed tools keeps them.
+_HISTORY_GATE_TURNS = 4
+
+
+def _needs_data_tools(
+    query: str,
+    message_history: list[dict[str, str]] | None = None,
+) -> bool:
     """True when this turn should pay the MCP/tool-schema latency cost."""
     if asks_about_tools(query):
         return True
-    messages = _helper_messages(query)
-    return should_require_tool(messages)
+    if should_require_tool(_helper_messages(query)):
+        return True
+    recent_user_turns = [
+        turn.get("content", "")
+        for turn in (message_history or [])
+        if turn.get("role") == "user" and isinstance(turn.get("content"), str)
+    ][-_HISTORY_GATE_TURNS:]
+    return any(
+        should_require_tool(_helper_messages(text)) for text in recent_user_turns
+    )
 
 
 def _needs_memory_tools(query: str) -> bool:
@@ -204,6 +220,15 @@ def _needs_memory_tools(query: str) -> bool:
 def _needs_memory_recall(query: str) -> bool:
     """True when recalled user memory is likely to change the answer."""
     return bool(_MEMORY_RECALL_RE.search(query))
+
+
+def _had_tool_round(messages: list[AnyMessage]) -> bool:
+    """True once this run has executed any tool round, memory tools included.
+
+    Sanitized history contains only user/assistant turns, so a ToolMessage can
+    only come from this run.
+    """
+    return any(isinstance(message, ToolMessage) for message in messages)
 
 
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
@@ -219,10 +244,13 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         # Force a tool call only while the full toolset is bound: with a group
         # switched off, `tool_choice="required"` could coerce an unrelated
         # tool, wasting a call and misreporting how the answer was sourced.
+        # The latch must count memory-only rounds too. services_used stays
+        # empty for those, and a still-forced second pass would coerce an
+        # unrelated data call or loop to the recursion limit.
         force_tool = (
             has_data_tools
             and not normalize_disabled_groups(state.get("disabled_tools"))
-            and not state["services_used"]
+            and not _had_tool_round(state["messages"])
             and should_require_tool(_helper_messages(query))
         )
         runnable = bound_required if force_tool else bound
@@ -585,6 +613,7 @@ def _initial_state(
 async def _prepare_tools_and_store(
     user_input: UserInput,
     disabled_tools: list[str] | None,
+    message_history: list[dict[str, str]] | None,
 ) -> tuple[list[BaseTool], BaseStore | None, bool, bool]:
     """Plan the turn and prepare only the tools/store it can actually use.
 
@@ -596,7 +625,7 @@ async def _prepare_tools_and_store(
     query = user_input.query
     user_id = user_input.user_id
 
-    needs_data_tools = _needs_data_tools(query)
+    needs_data_tools = _needs_data_tools(query, message_history)
     needs_memory_tools = bool(user_id) and _needs_memory_tools(query)
     recall_enabled = bool(user_id) and _needs_memory_recall(query)
     maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
@@ -633,7 +662,7 @@ async def run_agent(
         )
 
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
-        user_input, disabled_tools
+        user_input, disabled_tools, message_history
     )
     graph = _graph_for_request(
         model,
@@ -673,7 +702,7 @@ async def stream_agent_response(
         return
 
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
-        user_input, disabled_tools
+        user_input, disabled_tools, message_history
     )
     graph = _graph_for_request(
         model,

@@ -196,10 +196,6 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
-    return _parse_disabled_tools_value(payload.get("disabled_tools"))
-
-
 def _parse_disabled_tools_value(raw: Any) -> list[str]:
     """Tool groups the Surface says the user switched off.
 
