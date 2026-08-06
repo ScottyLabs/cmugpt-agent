@@ -24,6 +24,7 @@ import time
 import uuid
 from collections import deque
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Literal, TypedDict, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -149,30 +150,6 @@ def _index_config() -> IndexConfig | None:
     )
 
 
-def _pool_size(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer.") from exc
-    if value < 1:
-        raise RuntimeError(f"{name} must be at least 1.")
-    return value
-
-
-def _pool_config() -> dict[str, int]:
-    """Return validated Postgres pool bounds."""
-    min_size = _pool_size("MEMORY_DB_POOL_MIN", _PG_POOL_MIN)
-    max_size = _pool_size("MEMORY_DB_POOL_MAX", _PG_POOL_MAX)
-    if min_size > max_size:
-        raise RuntimeError(
-            "MEMORY_DB_POOL_MIN cannot be greater than MEMORY_DB_POOL_MAX."
-        )
-    return {"min_size": min_size, "max_size": max_size}
-
-
 _store: BaseStore | None = None
 _pg_cm: Any = None
 _store_lock = asyncio.Lock()
@@ -206,7 +183,7 @@ async def setup_store() -> BaseStore:
                 # _index_config's dict carries Postgres-specific keys beyond
                 # the shared IndexConfig type.
                 index=cast(Any, index),
-                pool_config=cast(Any, _pool_config()),
+                pool_config=cast(Any, {"min_size": _PG_POOL_MIN, "max_size": _PG_POOL_MAX}),
             )
             pg_store = await _pg_cm.__aenter__()
             try:
@@ -703,12 +680,21 @@ def _extraction_model_name() -> str:
     return os.getenv("MEMORY_EXTRACTION_MODEL", "openai/gpt-4o-mini")
 
 
-def _extractor_model() -> ChatOpenAI:
+@lru_cache(maxsize=4)
+def _extractor_model_for_key(model: str, api_key: str) -> ChatOpenAI:
+    # Cached like graph._make_chat_model_for_key so background learns reuse
+    # one HTTP client (keep-alive) instead of a new TLS handshake per turn.
     return ChatOpenAI(
-        model=_extraction_model_name(),
-        api_key=SecretStr(os.getenv("OPENROUTER_API_KEY", "")),
+        model=model,
+        api_key=SecretStr(api_key),
         base_url=OPENROUTER_BASE_URL,
         temperature=0.0,
+    )
+
+
+def _extractor_model() -> ChatOpenAI:
+    return _extractor_model_for_key(
+        _extraction_model_name(), os.getenv("OPENROUTER_API_KEY", "")
     )
 
 
@@ -738,16 +724,15 @@ async def learn(
     user_id: str,
     user_text: str,
     assistant_text: str,
-) -> list[str]:
+) -> None:
     """Background write path: distill durable facts from the latest exchange.
 
-    Best-effort, run off the response path, rate-limited per user. Returns the
-    newly stored facts (for tests/telemetry).
+    Best-effort, run off the response path, rate-limited per user.
     """
     if not _worth_extracting(user_text):
-        return []
+        return
     if not _learn_allowed(user_id):
-        return []
+        return
 
     existing = await _search(store, (user_id, _FACTS), user_text, 12)
     known = "\n".join(f"- {_text(item)}" for item in existing if _text(item))
@@ -759,12 +744,8 @@ async def learn(
         [SystemMessage(content=_EXTRACTION_SYSTEM), HumanMessage(content=payload)]
     )
     content = response.content if isinstance(response.content, str) else ""
-    stored: list[str] = []
     for fact in _parse_facts(content):
-        _, status = await add_fact(store, user_id, fact, source="extraction")
-        if status == "saved":
-            stored.append(fact)
-    return stored
+        await add_fact(store, user_id, fact, source="extraction")
 
 
 # --------------------------------------------------------------------------- #
@@ -783,16 +764,6 @@ async def list_facts(
         suppress_errors=False,
     )
     return [{"id": item.key, **item.value} for item in items]
-
-
-async def delete_fact(store: BaseStore, user_id: str, fact_id: str) -> bool:
-    """Delete one fact, returning whether it existed."""
-    if not is_valid_user_id(user_id):
-        return False
-    if await store.aget((user_id, _FACTS), fact_id) is None:
-        return False
-    await store.adelete((user_id, _FACTS), fact_id)
-    return True
 
 
 def _memory_type(item: Item) -> MemoryType:

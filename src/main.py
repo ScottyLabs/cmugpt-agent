@@ -26,17 +26,13 @@ from agent.graph import drain_background_tasks
 from agent.memory import (
     clear_memory,
     close_store,
-    delete_fact,
+    delete_memory_item,
     ensure_store,
     is_valid_user_id,
-    list_facts,
     list_memory_items,
     setup_store,
     store_is_ready,
     store_status,
-)
-from agent.memory import (
-    delete_memory_item as delete_memory_record,
 )
 
 logger = logging.getLogger(__name__)
@@ -435,13 +431,9 @@ async def get_memory(
         limit=limit,
         offset=offset,
     )
-    # Keep the original facts field for older Surface clients while exposing a
-    # unified item list for the searchable memory manager.
-    facts = await list_facts(store, user_id)
     return JSONResponse(
         content={
             "user_id": user_id,
-            "facts": facts,
             "items": items,
             "total": total,
             "limit": limit,
@@ -463,7 +455,7 @@ async def delete_typed_memory_item(
     """Delete one learned or explicitly remembered fact."""
     _require_valid_user_id(user_id)
     store = await ensure_store()
-    deleted = await delete_memory_record(store, user_id, kind, item_id)
+    deleted = await delete_memory_item(store, user_id, kind, item_id)
     if not deleted:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
@@ -471,25 +463,6 @@ async def delete_typed_memory_item(
         )
     return JSONResponse(
         content={"status": "deleted", "id": item_id, "type": kind},
-        status_code=HTTPStatus.OK,
-    )
-
-
-@app.delete(
-    "/memory/{user_id}/{fact_id}",
-    dependencies=[Depends(_require_shared_secret)],
-)
-async def delete_memory_item(user_id: str, fact_id: str) -> JSONResponse:
-    """Delete a single remembered fact for a user."""
-    _require_valid_user_id(user_id)
-    store = await ensure_store()
-    if not await delete_fact(store, user_id, fact_id):
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail="Memory item not found.",
-        )
-    return JSONResponse(
-        content={"status": "deleted", "id": fact_id},
         status_code=HTTPStatus.OK,
     )
 

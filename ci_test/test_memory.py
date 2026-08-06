@@ -433,33 +433,6 @@ def _test_parse_facts_is_tolerant() -> None:
     assert_equal(memory._parse_facts("[]"), [], "empty array -> empty")
 
 
-def _test_postgres_pool_configuration() -> None:
-    from unittest.mock import patch
-
-    with patch.dict(
-        "os.environ",
-        {"MEMORY_DB_POOL_MIN": "2", "MEMORY_DB_POOL_MAX": "4"},
-        clear=False,
-    ):
-        assert_equal(
-            memory._pool_config(),
-            {"min_size": 2, "max_size": 4},
-            "valid pool sizing is preserved",
-        )
-
-    with patch.dict(
-        "os.environ",
-        {"MEMORY_DB_POOL_MIN": "3", "MEMORY_DB_POOL_MAX": "2"},
-        clear=False,
-    ):
-        try:
-            memory._pool_config()
-        except RuntimeError as exc:
-            assert_true("cannot be greater" in str(exc), "inverted pool rejected")
-        else:
-            raise AssertionError("inverted Postgres pool bounds were accepted")
-
-
 async def _run_async() -> None:
     await _test_recall_roundtrip_and_isolation()
     await _test_dedup_skips_duplicates()
@@ -483,7 +456,6 @@ def run() -> None:
     _test_parse_facts_is_tolerant()
     _test_prompt_memory_section()
     _test_learn_rate_limit()
-    _test_postgres_pool_configuration()
 
 
 if __name__ == "__main__":

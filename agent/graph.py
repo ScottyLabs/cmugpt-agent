@@ -527,40 +527,7 @@ def build_graph(
     )
     graph.add_edge("tools", "agent")
     graph.add_edge("postprocess", END)
-    if store is None:
-        return graph.compile()
     return graph.compile(store=store)
-
-
-@lru_cache(maxsize=16)
-def _build_no_tool_graph(model: str, api_key: str, maps_enabled: bool):
-    """Cached graph for no-tool/no-memory turns. Saves compilation time only."""
-    return build_graph(
-        _make_chat_model_for_key(model, api_key),
-        [],
-        None,
-        recall_enabled=False,
-        maps_enabled=maps_enabled,
-    )
-
-
-def _graph_for_request(
-    model: str,
-    tools: list[BaseTool],
-    store: BaseStore | None,
-    *,
-    recall_enabled: bool,
-    maps_enabled: bool,
-):
-    if not tools and store is None and not recall_enabled:
-        return _build_no_tool_graph(model, _api_key(), maps_enabled)
-    return build_graph(
-        _make_chat_model(model),
-        tools,
-        store,
-        recall_enabled=recall_enabled,
-        maps_enabled=maps_enabled,
-    )
 
 
 def _sanitize_history(
@@ -664,8 +631,8 @@ async def run_agent(
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
         user_input, disabled_tools, message_history
     )
-    graph = _graph_for_request(
-        model,
+    graph = build_graph(
+        _make_chat_model(model),
         tools,
         store,
         recall_enabled=recall_enabled,
@@ -704,8 +671,8 @@ async def stream_agent_response(
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
         user_input, disabled_tools, message_history
     )
-    graph = _graph_for_request(
-        model,
+    graph = build_graph(
+        _make_chat_model(model),
         tools,
         store,
         recall_enabled=recall_enabled,
