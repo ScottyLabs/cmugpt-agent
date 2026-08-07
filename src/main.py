@@ -22,6 +22,13 @@ from agent.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limi
 
 app = FastAPI()
 
+# Request size bounds. Uvicorn has no default body limit, and every char of
+# the query can reach the model, so oversized input is both a cost and an
+# abuse vector.
+_MAX_BODY_BYTES = 256 * 1024
+_MAX_QUERY_CHARS = 4000
+_MAX_HISTORY_ITEMS = 200
+
 # CORS only restrains browser JS from other origins. AGENT_SHARED_SECRET
 # below is the real access boundary for direct requests.
 _allowed_origins = [
@@ -79,6 +86,8 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     query = candidate.get("query") or candidate.get("message") or candidate.get("input")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("A non-empty 'query' field is required.")
+    if len(query.strip()) > _MAX_QUERY_CHARS:
+        raise ValueError(f"'query' must be at most {_MAX_QUERY_CHARS} characters.")
 
     context = candidate.get("context")
     if context is not None and not isinstance(context, Mapping):
@@ -147,6 +156,11 @@ def _parse_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="'message_history' must be a list if provided.",
         )
+    if isinstance(message_history, list) and len(message_history) > _MAX_HISTORY_ITEMS:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"'message_history' must have at most {_MAX_HISTORY_ITEMS} items.",
+        )
     if isinstance(message_history, list):
         # Surface clients store system rows, so rejecting them would break
         # production. The agent strips system turns defensively.
@@ -167,6 +181,16 @@ def _parse_request(
             )
 
     return user_input, model, message_history, _parse_disabled_tools(payload)
+
+
+def _reject_oversized_body(request: Request) -> None:
+    """Reject huge bodies by header before request.json() parses them."""
+    length = request.headers.get("content-length")
+    if length is not None and length.isdigit() and int(length) > _MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Request body must be at most {_MAX_BODY_BYTES} bytes.",
+        )
 
 
 def _enforce_daily_token_limit(user_input: UserInput) -> None:
@@ -191,6 +215,7 @@ async def health() -> JSONResponse:
 
 @app.post("/agent/respond", dependencies=[Depends(_require_shared_secret)])
 async def agent_respond(request: Request) -> JSONResponse:
+    _reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -239,6 +264,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         event: done   data: <full AgentResponse JSON>
         event: error  data: {"error": "...", "detail": "..."}
     """
+    _reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:

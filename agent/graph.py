@@ -18,10 +18,10 @@ through the injected `writer` and the public entrypoints forward them as
 
 from __future__ import annotations
 
+import logging
 import operator
 import os
 from collections.abc import AsyncIterator
-from contextlib import suppress
 from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
@@ -33,7 +33,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -42,8 +42,13 @@ from pydantic import SecretStr
 
 from .cmu_maps import _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
+    REFUSAL_TEXT,
+    StreamScrubber,
+    apply_output_guard,
     apply_tool_transparency_guard,
+    canned_refusal_response,
     compute_thought,
+    is_flagrant_injection,
     should_require_tool,
 )
 from .mcp_tools import (
@@ -51,12 +56,15 @@ from .mcp_tools import (
     load_mcp_tools,
     normalize_disabled_groups,
     select_tools_for_query,
+    tool_group,
 )
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 from .token_limits import record_usage
 
 load_dotenv()
+
+_LOG = logging.getLogger("cmugpt.agent")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -72,11 +80,19 @@ _HISTORY_MAX_MESSAGE_CHARS = 3000
 _HISTORY_HINT_TURNS = 4
 
 # Tool results are resent on every later pass. The marker keeps the model
-# from presenting a truncated list as complete.
+# from presenting a truncated list as complete. Eats gets a higher cap
+# because the full dining list is about 9k chars and completeness is the
+# answer for list-everything questions.
 _TOOL_RESULT_MAX_CHARS = 6000
+_TOOL_RESULT_GROUP_CAPS = {"eats": 10_000}
 _TOOL_RESULT_TRUNCATION_MARKER = (
     "\n[Result truncated. More entries exist beyond this point.]"
 )
+
+# After this many tool rounds the model runs unbound. That both drops the
+# schema tokens from late passes and hard-bounds a tool-calling loop that
+# would otherwise run to LangGraph's recursion limit.
+_MAX_TOOL_ROUNDS = 3
 
 
 class AgentState(TypedDict):
@@ -94,6 +110,10 @@ class AgentState(TypedDict):
     disabled_tools: list[str]
     # Owner of the daily token budget for this run.
     user_id: str
+    # Completed tool rounds. Drives the unbound late passes.
+    tool_rounds: Annotated[int, operator.add]
+    # Sticky across passes so a later clean pass cannot clear a trip.
+    leak_detected: Annotated[bool, operator.or_]
 
 
 def _api_key() -> str:
@@ -143,26 +163,41 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
 
 
 def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
-    """Charge one model pass to the user's daily budget.
+    """Charge one model pass to the user's daily budget and log it.
 
     Falls back to a chars/4 estimate so the budget stays enforceable when
-    the stream carries no usage metadata.
+    the stream carries no usage metadata. The log line is what makes caps
+    and thresholds tunable from production data instead of guesses.
     """
-    usage = getattr(gathered, "usage_metadata", None)
-    if usage and usage.get("total_tokens"):
-        total = int(usage["total_tokens"])
-    else:
+    usage = getattr(gathered, "usage_metadata", None) or {}
+    estimated = not usage.get("total_tokens")
+    if estimated:
         input_chars = sum(len(_message_text(m)) for m in state["messages"])
         total = (input_chars + len(_message_text(gathered))) // 4
-    # Budget accounting must never break an answer in flight.
-    with suppress(Exception):
+    else:
+        total = int(usage["total_tokens"])
+    _LOG.info(
+        "pass_usage user=%s round=%s input=%s output=%s total=%s estimated=%s",
+        (state.get("user_id") or "anonymous")[:8],
+        state.get("tool_rounds", 0),
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        total,
+        estimated,
+    )
+    try:
         record_usage(state.get("user_id"), total)
+    except Exception:
+        # Never break an answer in flight, but a silent failure here would
+        # disable the budget, so it must be visible.
+        _LOG.exception("token budget recording failed")
 
 
-def _truncate_tool_result(result: str) -> str:
-    if len(result) <= _TOOL_RESULT_MAX_CHARS:
+def _truncate_tool_result(name: str, result: str) -> str:
+    cap = _TOOL_RESULT_GROUP_CAPS.get(tool_group(name) or "", _TOOL_RESULT_MAX_CHARS)
+    if len(result) <= cap:
         return result
-    return result[:_TOOL_RESULT_MAX_CHARS] + _TOOL_RESULT_TRUNCATION_MARKER
+    return result[:cap] + _TOOL_RESULT_TRUNCATION_MARKER
 
 
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
@@ -171,21 +206,43 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
+        # Past the round bound the model runs unbound. Without schemas it
+        # cannot call tools, so the pass must produce the final answer.
+        past_round_bound = state.get("tool_rounds", 0) >= _MAX_TOOL_ROUNDS
+        if past_round_bound:
+            _LOG.info("tool round bound reached after %s rounds", _MAX_TOOL_ROUNDS)
+
         # Forcing a tool call while a group is switched off can pick an
         # unrelated tool and misreport sources, so only force when nothing
         # is disabled.
         force_tool = (
-            bool(tools)
+            not past_round_bound
+            and bool(tools)
             and not normalize_disabled_groups(state.get("disabled_tools"))
             and not state["services_used"]
             and should_require_tool(_helper_messages(query))
         )
-        runnable = bound_required if force_tool else bound
+        if past_round_bound:
+            runnable = model
+        elif force_tool:
+            runnable = bound_required
+        else:
+            runnable = bound
 
         # Buffer passes postprocess may rewrite. Forced-pass preamble is not
         # the final answer, and map queries can draw a false failure claim
         # that postprocess strips before the user sees it.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
+
+        # Live deltas cannot be retracted, so they lag behind the scrubber's
+        # holdback. Buffered passes are scanned in postprocess instead.
+        scrubber: StreamScrubber | None = None
+        if not suppress_stream:
+            prompt_text = (
+                _message_text(state["messages"][0]) if state["messages"] else ""
+            )
+            scrubber = StreamScrubber(prompt_text)
+        withheld_notice_sent = False
 
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
@@ -197,12 +254,30 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
             if chunk.tool_call_chunks:
                 saw_tool_call = True
             text = _message_text(chunk)
-            if text and not saw_tool_call and not suppress_stream:
-                writer({"event": "delta", "data": {"text": text}})
-                streamed_any = True
+            if text and not saw_tool_call and scrubber is not None:
+                safe = scrubber.push(text)
+                if safe:
+                    writer({"event": "delta", "data": {"text": safe}})
+                    streamed_any = True
+                elif scrubber.tripped and streamed_any and not withheld_notice_sent:
+                    writer(
+                        {"event": "delta", "data": {"text": "\n\n[Response withheld.]"}}
+                    )
+                    withheld_notice_sent = True
 
         if gathered is None:
             gathered = AIMessageChunk(content="")
+
+        # Flush the held tail on every exit path, otherwise the last chars
+        # of a preamble before a tool call would silently vanish.
+        if scrubber is not None:
+            tail = scrubber.flush()
+            if tail:
+                writer({"event": "delta", "data": {"text": tail}})
+                streamed_any = True
+            if scrubber.tripped and streamed_any and not withheld_notice_sent:
+                writer({"event": "delta", "data": {"text": "\n\n[Response withheld.]"}})
+        leak_detected = scrubber.tripped if scrubber is not None else False
 
         _record_pass_usage(state, gathered)
 
@@ -213,12 +288,13 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
         if gathered.tool_calls:
             writer({"event": "status", "data": {"text": "Checking CMU tools..."}})
-            return {"messages": [final_message]}
+            return {"messages": [final_message], "leak_detected": leak_detected}
 
         return {
             "messages": [final_message],
             "response_text": _message_text(gathered),
             "streamed": streamed_any,
+            "leak_detected": leak_detected,
         }
 
     return agent_node
@@ -240,18 +316,32 @@ def _build_tools_node(tools: list[BaseTool]):
             args = call.get("args") or {}
             call_id = call.get("id") or f"call_{name}"
             tool = tools_by_name.get(name)
+            ok = True
             if tool is None:
+                ok = False
                 result = f"Tool '{name}' is not available."
             else:
                 try:
                     raw = await tool.ainvoke(args)
                     result = raw if isinstance(raw, str) else str(raw)
-                except Exception as exc:  # noqa: BLE001 - surface as tool data
-                    result = f"Tool '{name}' failed: {exc}"
+                except ToolException as exc:
+                    # Server-authored errors are data the model needs, like
+                    # "no building with that id".
+                    ok = False
+                    result = f"Tool '{name}' returned an error: {exc}"
+                except Exception:
+                    # Transport errors embed internal URLs and hosts, so the
+                    # model gets a generic string and the detail stays in
+                    # server logs.
+                    ok = False
+                    result = f"Tool '{name}' failed."
+                    _LOG.exception("tool %s failed", name)
 
             # Keep the full result for postprocess and map inference. Only
             # the copy resent to the model is capped.
-            new_invocations.append({"name": name, "arguments": args, "result": result})
+            new_invocations.append(
+                {"name": name, "arguments": args, "result": result, "ok": ok}
+            )
             if name not in state["services_used"] and name not in new_services:
                 new_services.append(name)
 
@@ -259,7 +349,7 @@ def _build_tools_node(tools: list[BaseTool]):
             # never as instructions.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{_truncate_tool_result(result)}\n"
+                f"{_truncate_tool_result(name, result)}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -269,6 +359,7 @@ def _build_tools_node(tools: list[BaseTool]):
             "messages": new_messages,
             "tool_invocations": new_invocations,
             "services_used": new_services,
+            "tool_rounds": 1,
         }
 
     return tools_node
@@ -302,6 +393,20 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
+
+    # The output guard runs after the guards above so any text they injected
+    # is scanned too. A stream-time trip forces the refusal outright, and a
+    # refusal must never ship with a map attached.
+    prompt_text = _message_text(state["messages"][0]) if state.get("messages") else ""
+    if state.get("leak_detected"):
+        parsed.response_text = REFUSAL_TEXT
+        parsed.cmu_maps = CmuMaps()
+    else:
+        cleaned, replaced = apply_output_guard(parsed.response_text or "", prompt_text)
+        parsed.response_text = cleaned
+        if replaced:
+            parsed.cmu_maps = CmuMaps()
+
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
@@ -414,6 +519,8 @@ def _initial_state(
         response_payload={},
         disabled_tools=list(disabled_tools or []),
         user_id=user_input.user_id or "",
+        tool_rounds=0,
+        leak_detected=False,
     )
 
 
@@ -451,6 +558,11 @@ async def run_agent(
             confidence=0.2,
         )
 
+    # Flagrant jailbreak phrasing gets the canned refusal before any tool
+    # loading or model call, so the whole turn costs zero tokens.
+    if is_flagrant_injection(user_input.query):
+        return canned_refusal_response()
+
     graph, tools = await _prepare_run(
         model, disabled_tools, user_input.query, message_history
     )
@@ -482,6 +594,13 @@ async def stream_agent_response(
         )
         yield ("delta", {"text": fb.response_text})
         yield ("done", fb.model_dump())
+        return
+
+    # Same zero-token fast path as run_agent, kept stream-shaped.
+    if is_flagrant_injection(user_input.query):
+        refusal = canned_refusal_response()
+        yield ("delta", {"text": refusal.response_text})
+        yield ("done", refusal.model_dump())
         return
 
     graph, tools = await _prepare_run(

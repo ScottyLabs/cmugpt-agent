@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from .guards import CMU_DATA_RE
+
 load_dotenv()
 
 _SERVER_NAME = "cmu"
@@ -72,14 +74,17 @@ _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
 }
 
 # Args blocks stay because parameter conventions live only there. The
-# trailing Returns prose adds nothing the model needs.
+# trailing Returns prose and the markdown boilerplate add nothing the model
+# needs.
 _RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*")
+_MARKDOWN_BOILERPLATE_RE = re.compile(r"\s*formatted as clean markdown", re.IGNORECASE)
 
 
 def condense_tool_description(description: str | None) -> str:
     if not description:
         return ""
     condensed = _RETURNS_PARAGRAPH_RE.sub("", description)
+    condensed = _MARKDOWN_BOILERPLATE_RE.sub("", condensed)
     return re.sub(r"\n{3,}", "\n\n", condensed).strip()
 
 
@@ -91,9 +96,11 @@ def select_tools_for_query(
     """Narrow the bound toolset to the groups the query plausibly needs.
 
     A query with no group signal falls back to recent user turns, so
-    follow-ups keep the groups the conversation was using. With no signal
-    anywhere every tool stays bound, so narrowing can only save tokens,
-    never remove a capability. Ungrouped tools are always kept.
+    follow-ups keep the groups the conversation was using. A campus-shaped
+    query with no group signal keeps every tool. Only when nothing anywhere
+    looks like campus data does the fallback shrink to the guide group, the
+    catch-all for student-life questions, so greetings stop paying for all
+    23 schemas. Ungrouped tools are always kept.
     """
     matched = {
         group for group, hint in _GROUP_HINT_RES.items() if hint.search(query or "")
@@ -106,7 +113,10 @@ def select_tools_for_query(
                 if isinstance(text, str) and hint.search(text)
             )
     if not matched:
-        return list(tools)
+        texts = [query or "", *[t for t in history_texts or [] if isinstance(t, str)]]
+        if any(CMU_DATA_RE.search(text) for text in texts):
+            return list(tools)
+        matched = {"guide"}
     return [
         tool
         for tool in tools

@@ -39,10 +39,12 @@ MAP_FAILURE_CLAIM_RE = re.compile(
     r"\b("
     r"wasn['\u2019]?t\s+able|was\s+not\s+able|couldn['\u2019]?t|could\s+not|"
     r"cannot|can['\u2019]?t|unable|failed|fail|error|issue|problem|trouble|"
-    r"didn['\u2019]?t\s+find|did\s+not\s+find"
+    r"didn['\u2019]?t\s+(?:find|return)|did\s+not\s+(?:find|return)|"
+    r"isn['\u2019]?t\s+find(?:ing)?|not\s+finding|return(?:ed)?\s+no"
     r")\b.{0,200}?\b("
     r"look(?:ing|ed)?\s*up|retriev\w*|find(?:ing)?|locat(?:e|ing|ions?)|"
-    r"data|directions?|route|path|building"
+    r"data|database|results?|records?|entr(?:y|ies)|"
+    r"directions?|route|path|building"
     r")\b",
     re.IGNORECASE | re.DOTALL,
 )
