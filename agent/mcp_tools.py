@@ -95,7 +95,7 @@ def select_tools_for_query(
 ) -> list[BaseTool]:
     """Narrow the bound toolset to the groups the query plausibly needs.
 
-    A query with no group signal falls back to recent user turns, so
+    A query with no group signal falls back to earlier user turns, so
     follow-ups keep the groups the conversation was using. A campus-shaped
     query with no group signal keeps every tool. Only when nothing anywhere
     looks like campus data does the fallback shrink to the guide group, the

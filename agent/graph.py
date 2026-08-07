@@ -56,7 +56,6 @@ from .mcp_tools import (
     load_mcp_tools,
     normalize_disabled_groups,
     select_tools_for_query,
-    tool_group,
 )
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
@@ -70,29 +69,25 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 StreamEvent = tuple[str, dict[str, Any]]
 
-# The whole history is billed on every model pass. Twelve messages keeps six
-# exchanges, enough for normal follow-ups.
-_HISTORY_MAX_MESSAGES = 12
-_HISTORY_MAX_MESSAGE_CHARS = 3000
 
-# Narrowing reads recent user turns only. Assistant turns repeat tool data
-# wholesale and would match everything.
-_HISTORY_HINT_TURNS = 4
+# Safety-net caps, not tuning knobs. Values are generous enough that normal
+# conversations never hit them and they only engage on runaway input.
 
-# Tool results are resent on every later pass. The marker keeps the model
-# from presenting a truncated list as complete. Eats gets a higher cap
-# because the full dining list is about 9k chars and completeness is the
-# answer for list-everything questions.
-_TOOL_RESULT_MAX_CHARS = 6000
-_TOOL_RESULT_GROUP_CAPS = {"eats": 10_000}
+# History is billed on every model pass. Sixty messages is thirty exchanges.
+_HISTORY_MAX_MESSAGES = 60
+_HISTORY_MAX_MESSAGE_CHARS = 12_000
+
+# User turns scanned for tool-group narrowing. Local regex only, no tokens.
+_HISTORY_HINT_TURNS = 20
+
+# Tool results are resent on every later pass. Twelve thousand chars fits
+# every current CMU tool result, including the 9k full dining list, so this
+# only engages if a tool starts returning something enormous. The marker
+# keeps the model from presenting a truncated list as complete.
+_TOOL_RESULT_MAX_CHARS = 12_000
 _TOOL_RESULT_TRUNCATION_MARKER = (
     "\n[Result truncated. More entries exist beyond this point.]"
 )
-
-# After this many tool rounds the model runs unbound. That both drops the
-# schema tokens from late passes and hard-bounds a tool-calling loop that
-# would otherwise run to LangGraph's recursion limit.
-_MAX_TOOL_ROUNDS = 3
 
 
 class AgentState(TypedDict):
@@ -193,11 +188,10 @@ def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
         _LOG.exception("token budget recording failed")
 
 
-def _truncate_tool_result(name: str, result: str) -> str:
-    cap = _TOOL_RESULT_GROUP_CAPS.get(tool_group(name) or "", _TOOL_RESULT_MAX_CHARS)
-    if len(result) <= cap:
+def _truncate_tool_result(result: str) -> str:
+    if len(result) <= _TOOL_RESULT_MAX_CHARS:
         return result
-    return result[:cap] + _TOOL_RESULT_TRUNCATION_MARKER
+    return result[:_TOOL_RESULT_MAX_CHARS] + _TOOL_RESULT_TRUNCATION_MARKER
 
 
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
@@ -206,28 +200,16 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
-        # Past the round bound the model runs unbound. Without schemas it
-        # cannot call tools, so the pass must produce the final answer.
-        past_round_bound = state.get("tool_rounds", 0) >= _MAX_TOOL_ROUNDS
-        if past_round_bound:
-            _LOG.info("tool round bound reached after %s rounds", _MAX_TOOL_ROUNDS)
-
         # Forcing a tool call while a group is switched off can pick an
         # unrelated tool and misreport sources, so only force when nothing
         # is disabled.
         force_tool = (
-            not past_round_bound
-            and bool(tools)
+            bool(tools)
             and not normalize_disabled_groups(state.get("disabled_tools"))
             and not state["services_used"]
             and should_require_tool(_helper_messages(query))
         )
-        if past_round_bound:
-            runnable = model
-        elif force_tool:
-            runnable = bound_required
-        else:
-            runnable = bound
+        runnable = bound_required if force_tool else bound
 
         # Buffer passes postprocess may rewrite. Forced-pass preamble is not
         # the final answer, and map queries can draw a false failure claim
@@ -337,8 +319,6 @@ def _build_tools_node(tools: list[BaseTool]):
                     result = f"Tool '{name}' failed."
                     _LOG.exception("tool %s failed", name)
 
-            # Keep the full result for postprocess and map inference. Only
-            # the copy resent to the model is capped.
             new_invocations.append(
                 {"name": name, "arguments": args, "result": result, "ok": ok}
             )
@@ -346,10 +326,11 @@ def _build_tools_node(tools: list[BaseTool]):
                 new_services.append(name)
 
             # Wrapped so the model treats tool output as untrusted data,
-            # never as instructions.
+            # never as instructions. The invocation above keeps the full
+            # result for map inference, only the model copy is capped.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{_truncate_tool_result(name, result)}\n"
+                f"{_truncate_tool_result(result)}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -465,10 +446,10 @@ def _cap_history_text(content: str) -> str:
 def _sanitize_history(
     message_history: list[dict[str, str]] | None,
 ) -> list[AnyMessage]:
-    """Convert caller history to LangChain messages, capped and sanitized.
+    """Convert caller history to LangChain messages, sanitized.
 
     Smuggled system or tool turns are an injection vector, so only user and
-    assistant turns carry over. Turns past the cap are dropped for cost.
+    assistant turns carry over.
     """
     if not message_history:
         return []
@@ -488,15 +469,19 @@ def _sanitize_history(
 def _history_hint_texts(
     message_history: list[dict[str, str]] | None,
 ) -> list[str]:
-    """Recent user turns that feed tool-group narrowing."""
+    """User turns that feed tool-group narrowing.
+
+    User turns only, because assistant turns repeat tool data wholesale and
+    would match every group.
+    """
     if not message_history:
         return []
     texts = [
-        turn.get("content")
+        turn["content"]
         for turn in message_history
         if turn.get("role") == "user" and isinstance(turn.get("content"), str)
     ]
-    return [text for text in texts[-_HISTORY_HINT_TURNS:] if isinstance(text, str)]
+    return texts[-_HISTORY_HINT_TURNS:]
 
 
 def _initial_state(
