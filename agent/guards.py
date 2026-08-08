@@ -263,6 +263,21 @@ def redact_secrets(text: str) -> str:
     return _BEARER_TOKEN_RE.sub(_redact_bearer_match, cleaned)
 
 
+# Reasoning models (MiniMax, DeepSeek, GLM) may delimit their chain of thought with
+# a tag such as `<think>` or `<mm:think>`. OpenRouter routes that content to a
+# separate field, but the closing delimiter intermittently bleeds into the
+# answer channel. Any such tag is stripped from outgoing text so it never
+# reaches the user. The optional `<provider>:` prefix covers vendor variants.
+_REASONING_TAG_RE = re.compile(
+    r"</?(?:[a-z]{1,12}:)?think(?:ing)?\s*>",
+    re.IGNORECASE,
+)
+
+
+def strip_reasoning_tags(text: str) -> str:
+    return _REASONING_TAG_RE.sub("", text)
+
+
 def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
     """Scrub outgoing text. Returns (cleaned text, whether fully replaced).
 
@@ -274,7 +289,7 @@ def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
         return text, False
     if _matches_leak_corpus(text, build_leak_corpus(system_prompt)):
         return REFUSAL_TEXT, True
-    return redact_secrets(text), False
+    return strip_reasoning_tags(redact_secrets(text)), False
 
 
 class StreamScrubber:
@@ -294,7 +309,10 @@ class StreamScrubber:
         self._corpus = build_leak_corpus(system_prompt) if system_prompt else ""
         self._secrets = _secret_values()
         self._text = ""
-        self._emitted = 0
+        # Count of cleaned (tag-stripped) characters already emitted. Tracking
+        # in cleaned space lets a reasoning tag split across chunks still be
+        # removed, since the whole safe region is re-stripped each push.
+        self._emitted_clean = 0
         self.tripped = False
 
     def _dangerous(self) -> bool:
@@ -304,6 +322,14 @@ class StreamScrubber:
             return True
         return _matches_leak_corpus(self._text, self._corpus)
 
+    def _emit_up_to(self, safe_raw: str) -> str:
+        # HOLDBACK_CHARS greatly exceeds any tag length, so safe_raw never ends
+        # mid-tag and its cleaned form only grows as a stable prefix.
+        clean = strip_reasoning_tags(safe_raw)
+        out = clean[self._emitted_clean :]
+        self._emitted_clean = len(clean)
+        return out
+
     def push(self, chunk: str) -> str:
         """Append model text and return the portion now safe to emit."""
         if self.tripped:
@@ -312,10 +338,8 @@ class StreamScrubber:
         if self._dangerous():
             self.tripped = True
             return ""
-        safe_until = max(self._emitted, len(self._text) - self.HOLDBACK_CHARS)
-        out = self._text[self._emitted : safe_until]
-        self._emitted = safe_until
-        return out
+        safe_len = max(0, len(self._text) - self.HOLDBACK_CHARS)
+        return self._emit_up_to(self._text[:safe_len])
 
     def flush(self) -> str:
         """Return the held tail after a final scan. Empty once tripped."""
@@ -324,9 +348,7 @@ class StreamScrubber:
         if self._dangerous():
             self.tripped = True
             return ""
-        out = self._text[self._emitted :]
-        self._emitted = len(self._text)
-        return out
+        return self._emit_up_to(self._text)
 
 
 # High-precision signatures only. A false positive refuses a legitimate user
