@@ -70,8 +70,9 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 StreamEvent = tuple[str, dict[str, Any]]
 
 
-# Safety-net caps, not tuning knobs. Values are generous enough that normal
-# conversations never hit them and they only engage on runaway input.
+# Safety limits rather than tuning parameters. The values are set high
+# enough that ordinary conversations never reach them, so they engage only
+# on anomalous input.
 
 # History is billed on every model pass. Sixty messages is thirty exchanges.
 _HISTORY_MAX_MESSAGES = 60
@@ -80,10 +81,11 @@ _HISTORY_MAX_MESSAGE_CHARS = 12_000
 # User turns scanned for tool-group narrowing. Local regex only, no tokens.
 _HISTORY_HINT_TURNS = 20
 
-# Tool results are resent on every later pass. Twelve thousand chars fits
-# every current CMU tool result, including the 9k full dining list, so this
-# only engages if a tool starts returning something enormous. The marker
-# keeps the model from presenting a truncated list as complete.
+# Tool results are resent on every subsequent pass. Twelve thousand
+# characters accommodates every current CMU tool result, including the 9k
+# full dining list, so the cap engages only if a tool begins returning
+# substantially more. The marker prevents the model from presenting a
+# truncated list as complete.
 _TOOL_RESULT_MAX_CHARS = 12_000
 _TOOL_RESULT_TRUNCATION_MARKER = (
     "\n[Result truncated. More entries exist beyond this point.]"
@@ -100,14 +102,15 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
-    # Tool groups the user switched off in the Surface. Their tools are
-    # already unbound. Postprocess reads this to keep the map embed off too.
+    # Tool groups the user disabled in the Surface. Their tools are already
+    # unbound. Postprocess reads this to suppress the map embed as well.
     disabled_tools: list[str]
     # Owner of the daily token budget for this run.
     user_id: str
-    # Completed tool rounds. Drives the unbound late passes.
+    # Completed tool rounds. Drives the unbound later passes.
     tool_rounds: Annotated[int, operator.add]
-    # Sticky across passes so a later clean pass cannot clear a trip.
+    # Persists across passes so that a subsequent clean pass cannot clear a
+    # detection.
     leak_detected: Annotated[bool, operator.or_]
 
 
@@ -120,8 +123,8 @@ def _make_chat_model(model: str) -> ChatOpenAI:
         model=model,
         api_key=SecretStr(_api_key()),
         base_url=OPENROUTER_BASE_URL,
-        # Report usage on the final stream chunk so the budget counts real
-        # usage instead of estimates.
+        # Report usage on the final stream chunk so the budget records
+        # measured consumption rather than estimates.
         stream_usage=True,
     )
 
@@ -160,9 +163,10 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
 def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
     """Charge one model pass to the user's daily budget and log it.
 
-    Falls back to a chars/4 estimate so the budget stays enforceable when
-    the stream carries no usage metadata. The log line is what makes caps
-    and thresholds tunable from production data instead of guesses.
+    Falls back to a characters/4 estimate so the budget remains enforceable
+    when the stream carries no usage metadata. The log line is what allows
+    the caps and thresholds to be tuned from production data rather than
+    estimated.
     """
     usage = getattr(gathered, "usage_metadata", None) or {}
     estimated = not usage.get("total_tokens")
@@ -183,8 +187,8 @@ def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
     try:
         record_usage(state.get("user_id"), total)
     except Exception:
-        # Never break an answer in flight, but a silent failure here would
-        # disable the budget, so it must be visible.
+        # An in-flight answer must not be interrupted, but a silent failure
+        # here would disable the budget, so it is logged explicitly.
         _LOG.exception("token budget recording failed")
 
 
@@ -200,9 +204,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
-        # Forcing a tool call while a group is switched off can pick an
-        # unrelated tool and misreport sources, so only force when nothing
-        # is disabled.
+        # Forcing a tool call while a group is disabled can select an
+        # unrelated tool and misreport sources, so forcing applies only when
+        # no group is disabled.
         force_tool = (
             bool(tools)
             and not normalize_disabled_groups(state.get("disabled_tools"))
@@ -211,13 +215,13 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         )
         runnable = bound_required if force_tool else bound
 
-        # Buffer passes postprocess may rewrite. Forced-pass preamble is not
-        # the final answer, and map queries can draw a false failure claim
-        # that postprocess strips before the user sees it.
+        # Buffer passes that postprocess may rewrite. A forced-pass preamble
+        # is not the final answer, and map queries can elicit a false failure
+        # claim that postprocess removes before the user sees it.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
-        # Live deltas cannot be retracted, so they lag behind the scrubber's
-        # holdback. Buffered passes are scanned in postprocess instead.
+        # Live deltas cannot be retracted, so they trail the scrubber's
+        # holdback. Buffered passes are instead scanned in postprocess.
         scrubber: StreamScrubber | None = None
         if not suppress_stream:
             prompt_text = (
@@ -250,8 +254,8 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         if gathered is None:
             gathered = AIMessageChunk(content="")
 
-        # Flush the held tail on every exit path, otherwise the last chars
-        # of a preamble before a tool call would silently vanish.
+        # Flush the held tail on every exit path. Otherwise the final
+        # characters of a preamble preceding a tool call would be lost.
         if scrubber is not None:
             tail = scrubber.flush()
             if tail:
@@ -307,14 +311,14 @@ def _build_tools_node(tools: list[BaseTool]):
                     raw = await tool.ainvoke(args)
                     result = raw if isinstance(raw, str) else str(raw)
                 except ToolException as exc:
-                    # Server-authored errors are data the model needs, like
-                    # "no building with that id".
+                    # Server-authored errors are data the model requires, for
+                    # example "no building with that id".
                     ok = False
                     result = f"Tool '{name}' returned an error: {exc}"
                 except Exception:
                     # Transport errors embed internal URLs and hosts, so the
-                    # model gets a generic string and the detail stays in
-                    # server logs.
+                    # model receives a generic string and the detail is
+                    # confined to server logs.
                     ok = False
                     result = f"Tool '{name}' failed."
                     _LOG.exception("tool %s failed", name)
@@ -325,9 +329,10 @@ def _build_tools_node(tools: list[BaseTool]):
             if name not in state["services_used"] and name not in new_services:
                 new_services.append(name)
 
-            # Wrapped so the model treats tool output as untrusted data,
-            # never as instructions. The invocation above keeps the full
-            # result for map inference, only the model copy is capped.
+            # Wrapped so the model treats tool output as untrusted data
+            # rather than instructions. The invocation record above retains
+            # the full result for map inference. Only the model's copy is
+            # capped.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
                 f"{_truncate_tool_result(result)}\n"
@@ -369,15 +374,15 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    # CMUMaps switched off means no map embed either, not just no map tools.
-    # The guard below is what attaches the map to the answer.
+    # Disabling CMUMaps suppresses the map embed as well, not merely the map
+    # tools. The guard below is what attaches a map to the answer.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
 
-    # The output guard runs after the guards above so any text they injected
-    # is scanned too. A stream-time trip forces the refusal outright, and a
-    # refusal must never ship with a map attached.
+    # The output guard runs after the guards above so that any text they
+    # injected is also scanned. A detection during streaming forces the
+    # refusal outright, and a refusal must never carry an attached map.
     prompt_text = _message_text(state["messages"][0]) if state.get("messages") else ""
     if state.get("leak_detected"):
         parsed.response_text = REFUSAL_TEXT
@@ -391,8 +396,9 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
-    # A buffered answer (forced tool pass or map query) has not streamed yet.
-    # Emit the repaired text now so the user only sees the corrected version.
+    # A buffered answer (forced tool pass or map query) has not yet streamed.
+    # Emitting the repaired text here ensures the user sees only the
+    # corrected version.
     if not state.get("streamed") and parsed.response_text:
         writer({"event": "delta", "data": {"text": parsed.response_text}})
 
@@ -415,7 +421,8 @@ def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = T
     """Compile the agent graph for one request (model and tools captured).
 
     `tools` must already have the user's disabled groups filtered out. The
-    agent node binds exactly this list, so anything missing here is uncallable.
+    agent node binds exactly this list, so anything absent from it is
+    uncallable.
     """
     # ty does not yet structurally match TypedDict against langgraph's
     # StateLike protocol (still failing on ty 0.0.65). AgentState is a plain
@@ -439,17 +446,18 @@ def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = T
 def _cap_history_text(content: str) -> str:
     if len(content) <= _HISTORY_MAX_MESSAGE_CHARS:
         return content
-    # Keep the head. Answers front-load the substance follow-ups reference.
+    # Retain the head, since answers front-load the substance that
+    # follow-ups reference.
     return content[:_HISTORY_MAX_MESSAGE_CHARS] + "\n[earlier turn truncated]"
 
 
 def _sanitize_history(
     message_history: list[dict[str, str]] | None,
 ) -> list[AnyMessage]:
-    """Convert caller history to LangChain messages, sanitized.
+    """Convert caller history to sanitized LangChain messages.
 
-    Smuggled system or tool turns are an injection vector, so only user and
-    assistant turns carry over.
+    Injected system or tool turns constitute an injection vector, so only
+    user and assistant turns are carried over.
     """
     if not message_history:
         return []
@@ -469,10 +477,10 @@ def _sanitize_history(
 def _history_hint_texts(
     message_history: list[dict[str, str]] | None,
 ) -> list[str]:
-    """User turns that feed tool-group narrowing.
+    """User turns supplied to tool-group narrowing.
 
-    User turns only, because assistant turns repeat tool data wholesale and
-    would match every group.
+    Restricted to user turns because assistant turns reproduce tool data
+    verbatim and would therefore match every group.
     """
     if not message_history:
         return []
@@ -517,8 +525,8 @@ async def _prepare_run(
 ) -> tuple[Any, list[BaseTool]]:
     """Load tools, narrow them to the query, and compile the graph.
 
-    Narrowing runs after the disabled-group filter so a keyword match can
-    never re-bind a switched-off group.
+    Narrowing runs after the disabled-group filter so that a keyword match
+    cannot re-bind a disabled group.
     """
     tools = filter_tools(await load_mcp_tools(), disabled_tools)
     tools = select_tools_for_query(tools, query, _history_hint_texts(message_history))
@@ -534,8 +542,8 @@ async def run_agent(
 ) -> AgentResponse:
     """Non-streaming entry point. Runs the graph and returns the full response.
 
-    `disabled_tools` lists the groups the user switched off in the Surface.
-    Those tools are never bound.
+    `disabled_tools` lists the groups the user disabled in the Surface. Those
+    tools are never bound.
     """
     if not _api_key():
         return _fallback_response(
@@ -543,8 +551,8 @@ async def run_agent(
             confidence=0.2,
         )
 
-    # Flagrant jailbreak phrasing gets the canned refusal before any tool
-    # loading or model call, so the whole turn costs zero tokens.
+    # Flagrant jailbreak phrasing receives the canned refusal before any tool
+    # loading or model call, so the turn consumes no tokens.
     if is_flagrant_injection(user_input.query):
         return canned_refusal_response()
 
@@ -581,7 +589,7 @@ async def stream_agent_response(
         yield ("done", fb.model_dump())
         return
 
-    # Same zero-token fast path as run_agent, kept stream-shaped.
+    # The same zero-token fast path as run_agent, expressed as stream events.
     if is_flagrant_injection(user_input.query):
         refusal = canned_refusal_response()
         yield ("delta", {"text": refusal.response_text})

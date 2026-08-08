@@ -1,14 +1,15 @@
 """Per-user daily token budget.
 
-Usage lives in a sqlite file because the Procfile runs two uvicorn workers.
-A per-process counter would give each worker its own budget, doubling the
-effective limit.
+Usage is persisted to SQLite because the Procfile runs two uvicorn workers.
+A per-process counter would give each worker an independent budget and so
+double the effective limit.
 
-The budget is a soft ceiling. The request that crosses the line still
-completes and the next one is rejected.
+Enforcement is a soft ceiling: the request that exceeds the limit still
+completes, and the request after it is rejected.
 
-user_id comes from the request body, so the budget trusts the Surface to
-authenticate its users and AGENT_SHARED_SECRET to gate direct callers.
+`user_id` originates from the request body, so this module depends on the
+Surface to authenticate its users and on AGENT_SHARED_SECRET to restrict
+direct callers.
 """
 
 import os
@@ -18,7 +19,8 @@ from datetime import UTC, datetime
 # Total tokens (input + output) one user may spend per UTC day.
 DAILY_TOKEN_LIMIT = 1_000_000
 
-# Anonymous requests share one bucket. The Surface always sends a user_id.
+# Requests without a user_id share a single counter. The Surface always
+# supplies one.
 _ANONYMOUS_KEY = "anonymous"
 
 
@@ -45,13 +47,13 @@ class DailyTokenLimitExceeded(Exception):
 
 
 def _db_path() -> str:
-    # Losing the default file on redeploy only grants a fresh budget. It
-    # never wrongly blocks a user.
+    # Loss of the default file on redeploy resets accumulated usage. The
+    # failure mode is therefore under-counting, never a spurious block.
     return os.getenv("TOKEN_USAGE_DB", "/tmp/cmugpt_token_usage.sqlite3")
 
 
 def _today() -> str:
-    # UTC so both workers agree on the day boundary.
+    # UTC keeps the day boundary identical across workers.
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 

@@ -5,10 +5,10 @@ streamable-HTTP session on invocation, so no session outlives a graph run.
 The graph wraps tool results itself (see `agent/graph.py`) because tool
 output is untrusted data.
 
-Tools are grouped by service. The Surface switches groups off per user
+Tools are grouped by service. The Surface disables groups per user
 (`filter_tools`) and the agent narrows each request to the groups the query
-needs (`select_tools_for_query`) since every bound schema costs input tokens
-on every model pass.
+requires (`select_tools_for_query`), since every bound schema costs input
+tokens on every model pass.
 """
 
 import os
@@ -25,9 +25,9 @@ load_dotenv()
 
 _SERVER_NAME = "cmu"
 
-# Every tool the MCP server publishes is named `<group>_<action>` (for example
-# `maps_get_path`, `eats_get_location_hours`), so a group is switched off by
-# dropping each tool that carries its prefix.
+# Every tool the MCP server publishes is named `<group>_<action>` (for
+# example `maps_get_path`, `eats_get_location_hours`), so a group is disabled
+# by dropping each tool carrying its prefix.
 TOOL_GROUP_LABELS: dict[str, str] = {
     "maps": "CMUMaps",
     "courses": "CMUCourses",
@@ -35,8 +35,8 @@ TOOL_GROUP_LABELS: dict[str, str] = {
     "guide": "CMU Guide",
 }
 
-# Query signals per tool group. When nothing matches, every group stays
-# bound, so a missed keyword can never cost the model a tool it needed.
+# Query signals per tool group. When nothing matches, every group remains
+# bound, so a missed keyword cannot deprive the model of a needed tool.
 _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
     "eats": re.compile(
         r"\b("
@@ -73,9 +73,9 @@ _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
     ),
 }
 
-# Args blocks stay because parameter conventions live only there. The
-# trailing Returns prose and the markdown boilerplate add nothing the model
-# needs.
+# Args blocks are retained because parameter conventions are documented only
+# there. The trailing Returns prose and the markdown boilerplate contribute
+# nothing the model requires.
 _RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*")
 _MARKDOWN_BOILERPLATE_RE = re.compile(r"\s*formatted as clean markdown", re.IGNORECASE)
 
@@ -93,14 +93,15 @@ def select_tools_for_query(
     query: str,
     history_texts: Iterable[str] | None = None,
 ) -> list[BaseTool]:
-    """Narrow the bound toolset to the groups the query plausibly needs.
+    """Narrow the bound toolset to the groups the query plausibly requires.
 
     A query with no group signal falls back to earlier user turns, so
-    follow-ups keep the groups the conversation was using. A campus-shaped
-    query with no group signal keeps every tool. Only when nothing anywhere
-    looks like campus data does the fallback shrink to the guide group, the
-    catch-all for student-life questions, so greetings stop paying for all
-    23 schemas. Ungrouped tools are always kept.
+    follow-ups retain the groups the conversation was already using. A query
+    that is campus-related but carries no group signal retains every tool.
+    Only when no text anywhere resembles campus data does the fallback
+    contract to the guide group, the general category for student-life
+    questions, so that greetings no longer incur the cost of all 23 schemas.
+    Ungrouped tools are always retained.
     """
     matched = {
         group for group, hint in _GROUP_HINT_RES.items() if hint.search(query or "")
@@ -135,9 +136,9 @@ def tool_group(tool_name: str) -> str | None:
 def normalize_disabled_groups(disabled: Iterable[str] | None) -> set[str]:
     """Coerce caller-supplied group ids into known group keys.
 
-    Accepts the ids the Surface sends (`maps`) as well as the labels it shows
-    (`CMUMaps`), and ignores anything unrecognized, so a malformed or renamed
-    entry can never silently re-enable a group the user switched off.
+    Accepts both the ids the Surface sends (`maps`) and the labels it
+    displays (`CMUMaps`), and ignores anything unrecognized, so a malformed
+    or renamed entry cannot silently re-enable a group the user disabled.
     """
     if not disabled:
         return set()
@@ -163,10 +164,11 @@ def filter_tools(
 ) -> list[BaseTool]:
     """Drop every tool belonging to a disabled group.
 
-    The model never learns the dropped tools exist. They are left out of the
-    prompt catalog and out of `bind_tools`, so it has no schema to call them
-    with. The tools node is built from the same filtered list, so a call
-    smuggled in through conversation history resolves to "not available".
+    The model is never informed that the dropped tools exist. They are
+    omitted from both the prompt catalog and `bind_tools`, leaving no schema
+    through which to call them. The tools node is constructed from the same
+    filtered list, so a call injected via conversation history resolves to
+    "not available".
     """
     groups = normalize_disabled_groups(disabled)
     if not groups:
@@ -175,7 +177,8 @@ def filter_tools(
 
 
 def _server_url() -> str:
-    # Read at call time so dotenv order and runtime env changes are respected.
+    # Read at call time so that dotenv ordering and runtime environment
+    # changes are respected.
     return os.getenv("MCP_SERVER_URL", "")
 
 
@@ -203,9 +206,10 @@ async def load_mcp_tools() -> list[BaseTool]:
         client = _build_client(url)
         tools = await client.get_tools()
     except Exception:
-        # Continue without tools rather than failing the turn.
+        # Continue without tools rather than fail the turn.
         return []
-    # Condensing here reaches the prompt catalog and the bound schemas.
+    # Condensing here propagates to both the prompt catalog and the bound
+    # schemas.
     for tool in tools:
         tool.description = condense_tool_description(tool.description)
     return tools

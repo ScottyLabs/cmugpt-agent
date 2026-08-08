@@ -4,16 +4,16 @@ The model produces plain GitHub-flavored Markdown with no JSON envelope.
 Graph nodes compute cmu_maps, services_used, and thought deterministically,
 so the prompt never asks the model for structured output.
 
-The prompt is compact because it is billed on every model pass. The tool
-catalog lists names only, since bind_tools already sends each tool's full
-description and schema.
+The prompt is kept compact because it is billed on every model pass. The
+tool catalog lists names only, since bind_tools already transmits each
+tool's full description and schema.
 """
 
 from collections.abc import Iterable
 
 from langchain_core.tools import BaseTool
 
-# Interpolated below so the output guard's echo allowlist can never drift
+# Interpolated below so that the output guard's echo allowlist cannot drift
 # from what the prompt actually instructs the model to say.
 from .guards import (
     CRISIS_RESOURCES_LINE,
@@ -23,9 +23,9 @@ from .guards import (
 )
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups, tool_group
 
-# Substrings marking a tool as able to return a route between two points
-# rather than locate one building. Matched against tool names so the prompt
-# adapts to whatever the MCP server exposes.
+# Substrings identifying a tool as capable of returning a route between two
+# points rather than locating a single building. Matched against tool names
+# so the prompt adapts to whatever the MCP server exposes.
 _ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
 
 
@@ -37,11 +37,11 @@ def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
 
 
 def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
-    """Directions guidance tailored to routing tool availability.
+    """Directions guidance conditioned on routing-tool availability.
 
-    Without a routing tool the model must not invent steps or claim a failed
-    lookup, since the attached map is the source of truth. With CMUMaps off
-    there is no map and none may be promised.
+    Without a routing tool the model must neither invent steps nor claim a
+    failed lookup, since the attached map is the authoritative source. With
+    CMUMaps disabled there is no map, and none may be promised.
     """
     if not maps_enabled:
         return (
@@ -74,10 +74,10 @@ def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
 
 
 def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
-    """Name the switched-off tool groups, if any.
+    """Name the disabled tool groups, if any.
 
-    The tools are already unbound. This section only lets the model explain
-    why it cannot look something up instead of guessing at the data.
+    The tools are already unbound. This section exists solely so the model
+    can explain why a lookup is unavailable rather than guess at the data.
     """
     labels = disabled_group_labels(disabled_tools)
     if not labels:
@@ -97,7 +97,7 @@ def _variable_sections(
     tools: list[BaseTool] | None,
     disabled_tools: Iterable[str] | None,
 ) -> str:
-    """The per-request middle of the prompt. Catalog, directions, disabled."""
+    """The per-request section of the prompt: catalog, directions, disabled."""
     tool_catalog = "No external tools are available right now."
     if tools:
         names = ", ".join(f"`{tool.name}`" for tool in tools)
@@ -107,9 +107,9 @@ def _variable_sections(
     has_maps_tools = any(
         tool_group(tool.name or "") == "maps" for tool in (tools or [])
     )
-    # No maps tools bound and not user-disabled means the query is not
-    # map-shaped, so routing guidance would be dead weight. The OFF warning
-    # always stays when the user disabled the group.
+    # No bound maps tools without a user disable implies the query is not
+    # map-related, making routing guidance redundant. The disabled-group
+    # warning is always retained when the user disabled the group.
     if maps_enabled and not has_maps_tools:
         directions_section = ""
     else:
@@ -138,8 +138,8 @@ def build_system_prompt(
     """Compose the system prompt, injecting any discovered MCP tools.
 
     `tools` is expected to be already filtered (see `mcp_tools.filter_tools`).
-    `disabled_tools` is what was filtered out, used only for the explanatory
-    section above.
+    `disabled_tools` records what was filtered out and is used only for the
+    explanatory section above.
     """
     return _CORE_RULES_A + _variable_sections(tools, disabled_tools) + _CORE_RULES_B
 

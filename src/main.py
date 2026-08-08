@@ -22,15 +22,16 @@ from agent.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limi
 
 app = FastAPI()
 
-# Request size bounds. Uvicorn has no default body limit, and every char of
-# the query can reach the model, so oversized input is both a cost and an
-# abuse vector.
+# Request size bounds. Uvicorn imposes no default body limit, and every
+# character of the query can reach the model, so oversized input is both a
+# cost and an abuse vector.
 _MAX_BODY_BYTES = 256 * 1024
 _MAX_QUERY_CHARS = 4000
 _MAX_HISTORY_ITEMS = 200
 
-# CORS only restrains browser JS from other origins. AGENT_SHARED_SECRET
-# below is the real access boundary for direct requests.
+# CORS constrains only browser JavaScript from other origins.
+# AGENT_SHARED_SECRET below is the actual access boundary for direct
+# requests.
 _allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "https://cmugpt.com").split(",")
@@ -43,9 +44,9 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# Optional shared-secret auth. With AGENT_SHARED_SECRET set, /agent/respond*
-# requires a matching bearer token. auto_error=False keeps our own error
-# envelope.
+# Optional shared-secret authentication. When AGENT_SHARED_SECRET is set,
+# /agent/respond* requires a matching bearer token. auto_error=False
+# preserves this module's own error envelope.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -106,10 +107,11 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _parse_disabled_tools(payload: Mapping[str, Any]) -> list[str]:
-    """Tool groups the Surface says the user switched off.
+    """Tool groups the Surface reports the user disabled.
 
-    Unknown group ids are dropped by the agent rather than rejected here, so a
-    Surface that gains a new switch before the agent knows about it still works.
+    Unknown group ids are dropped by the agent rather than rejected here, so
+    a Surface that gains a new toggle before the agent recognizes it
+    continues to function.
     """
     raw = payload.get("disabled_tools")
     if raw is None:
@@ -162,7 +164,7 @@ def _parse_request(
             detail=f"'message_history' must have at most {_MAX_HISTORY_ITEMS} items.",
         )
     if isinstance(message_history, list):
-        # Surface clients store system rows, so rejecting them would break
+        # Surface clients persist system rows, so rejecting them would break
         # production. The agent strips system turns defensively.
         valid_history = all(
             isinstance(item, Mapping)
@@ -184,7 +186,7 @@ def _parse_request(
 
 
 def _reject_oversized_body(request: Request) -> None:
-    """Reject huge bodies by header before request.json() parses them."""
+    """Reject oversized bodies by header before request.json() parses them."""
     length = request.headers.get("content-length")
     if length is not None and length.isdigit() and int(length) > _MAX_BODY_BYTES:
         raise HTTPException(
@@ -194,10 +196,11 @@ def _reject_oversized_body(request: Request) -> None:
 
 
 def _enforce_daily_token_limit(user_input: UserInput) -> None:
-    """Reject with 429 once the user's daily budget is spent.
+    """Reject with 429 once the user's daily budget is exhausted.
 
-    Checked before any model call. The streaming endpoint has already sent
-    200 by the time its generator runs, so it cannot signal this itself.
+    Checked before any model call, because the streaming endpoint has
+    already returned 200 by the time its generator runs and therefore
+    cannot signal this condition itself.
     """
     try:
         ensure_within_daily_limit(user_input.user_id)

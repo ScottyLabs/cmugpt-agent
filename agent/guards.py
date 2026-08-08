@@ -1,13 +1,14 @@
 """Deterministic, framework-agnostic guards and metadata computation.
 
-These helpers enforce what the system prompt can only request. The prompt
-asks the model to behave, while the guards here make leaks and false
-disclosures impossible regardless of what the model generates. None of them
-call an LLM, so they add zero input tokens and stay easy to unit-test.
+The system prompt can only request compliance. These helpers enforce it,
+making leaks and false disclosures impossible regardless of what the model
+generates. None of them invoke an LLM, so they add no input tokens and
+remain directly unit-testable.
 
-Covered here. Tool-transparency repair, deterministic `thought` computation,
-secret and prompt-leak scrubbing of outgoing text, a streaming holdback
-scrubber, and a zero-token fast path for flagrant injection attempts.
+This module provides tool-transparency repair, deterministic `thought`
+computation, secret and prompt-leak scrubbing of outgoing text, a streaming
+holdback scrubber, and a zero-token fast path for flagrant injection
+attempts.
 """
 
 import os
@@ -17,10 +18,11 @@ from urllib.parse import urlparse
 
 from .schema import ActionType, AgentResponse, Thought
 
-# Strings the prompt explicitly tells the model to echo. The leak detector
-# must never treat these as prompt leakage, or crisis answers and polite
-# refusals would be replaced by refusals. prompts.py interpolates these same
-# constants into the prompt so the allowlist cannot drift from it.
+# Strings the prompt explicitly instructs the model to echo. The leak
+# detector must exempt them, since otherwise a legitimate crisis response or
+# refusal would itself be classified as a leak and discarded. prompts.py
+# interpolates these same constants, so the allowlist cannot drift from the
+# prompt.
 IDENTITY_PHRASE = "CMUGPT, an assistant for CMU campus information"
 CRISIS_RESOURCES_LINE = (
     "CMU CaPS (412-268-2922), the 988 Suicide & Crisis Lifeline, or CMU "
@@ -72,8 +74,8 @@ NEGATIVE_TOOL_CLAIM_PATTERNS = [
     ),
 ]
 
-# Heuristic markers that suggest the assistant declined or redirected. Used only
-# to calibrate confidence; correctness of refusals is enforced elsewhere.
+# Heuristic markers indicating the assistant declined or redirected. Used
+# only to calibrate confidence. Refusal correctness is enforced elsewhere.
 REFUSAL_MARKERS = (
     "can't help",
     "cannot help",
@@ -163,8 +165,9 @@ def apply_tool_transparency_guard(
 
 _REDACTION = "[redacted]"
 
-# Env vars whose live values must never reach the user. The model does not
-# see most of them, but tool errors and misconfigured servers can carry them.
+# Environment variables whose live values must never reach the user. The
+# model does not observe most of them, but tool errors and misconfigured
+# servers can propagate them into output.
 _SECRET_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "AGENT_SHARED_SECRET",
@@ -172,23 +175,23 @@ _SECRET_ENV_NAMES = (
     "DATABASE_URL",
 )
 
-# Values that overlap these public URLs are never redacted, otherwise every
-# legitimate map link would be mangled.
+# Values overlapping these public URLs are exempt from redaction, which
+# would otherwise corrupt every legitimate map link.
 _PUBLIC_URL_PREFIXES = ("https://maps.scottylabs.org",)
 
-# Unset or tiny values are skipped because replacing them would corrupt
-# ordinary text.
+# Unset or very short values are skipped, since substituting them would
+# corrupt ordinary text.
 _MIN_SECRET_CHARS = 8
 
 _OPENROUTER_KEY_RE = re.compile(r"sk-or(?:-v1)?-[A-Za-z0-9]{20,}")
 
-# Only high-entropy bearer tokens are redacted so code-help answers with
-# placeholder tokens survive.
+# Only high-entropy bearer tokens are redacted, so code-help answers
+# containing placeholder tokens are preserved.
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{30,})")
 
-# A leak is an 80-char normalized window of the answer found verbatim in the
-# prompt. The step trades a slightly higher effective threshold for fewer
-# scans.
+# A leak is defined as an 80-character normalized window of the answer
+# occurring verbatim in the prompt. The stride reduces the number of scans at
+# the cost of a marginally higher effective detection threshold.
 _LEAK_WINDOW = 80
 _LEAK_SCAN_STEP = 8
 
@@ -206,8 +209,8 @@ def _secret_values() -> list[str]:
         if any(value in public for public in _PUBLIC_URL_PREFIXES):
             continue
         values.append(value)
-        # Transport errors often carry just the host, so redact the netloc of
-        # URL-shaped secrets too.
+        # Transport errors frequently expose only the host, so the netloc of
+        # URL-shaped secrets is redacted as well.
         if "://" in value:
             netloc = urlparse(value).netloc
             if len(netloc) >= _MIN_SECRET_CHARS and not any(
@@ -218,9 +221,9 @@ def _secret_values() -> list[str]:
 
 
 def build_leak_corpus(system_prompt: str) -> str:
-    """Normalized prompt text with the echo-safe snippets cut out.
+    """Normalized prompt text with the echo-safe snippets removed.
 
-    Snippets are replaced with a NUL byte so a scan window can never match
+    Snippets are replaced by a NUL byte so that no scan window can match
     across the seam left by a removal.
     """
     corpus = _normalize_leak_text(system_prompt)
@@ -245,8 +248,8 @@ def _redact_bearer_match(match: re.Match[str]) -> str:
     token = match.group(1)
     has_lower = any(c.islower() for c in token)
     has_digit = any(c.isdigit() for c in token)
-    # Real tokens mix lowercase and digits. Placeholders like YOUR_TOKEN_HERE
-    # or your_token_goes_right_here do not.
+    # Genuine tokens combine lowercase letters and digits. Placeholders such
+    # as YOUR_TOKEN_HERE do not.
     if has_lower and has_digit:
         return match.group(0).replace(token, _REDACTION)
     return match.group(0)
@@ -261,11 +264,11 @@ def redact_secrets(text: str) -> str:
 
 
 def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
-    """Scrub outgoing text. Returns (clean text, whether fully replaced).
+    """Scrub outgoing text. Returns (cleaned text, whether fully replaced).
 
-    Runs last in postprocess so text injected by earlier guards is scanned
-    too. A prompt leak replaces the whole answer, while stray secrets are
-    redacted in place.
+    Runs last in postprocess so that text injected by earlier guards is also
+    scanned. A prompt leak replaces the entire answer, whereas incidental
+    secrets are redacted in place.
     """
     if not text:
         return text, False
@@ -275,15 +278,16 @@ def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
 
 
 class StreamScrubber:
-    """Rolling holdback so leaks are caught before they reach the SSE wire.
+    """Rolling holdback that catches leaks before they are transmitted.
 
-    Postprocess cannot retract an emitted delta, so the stream lags the model
-    by a fixed tail. Any leak detectable within the scan window is still
-    unemitted when the trip happens. After a trip nothing more is emitted and
-    postprocess puts the refusal in the authoritative done payload.
+    An emitted delta cannot be retracted, so the stream trails the model by a
+    fixed tail. Any leak detectable within the scan window therefore remains
+    unemitted at the moment of detection. Once tripped, nothing further is
+    emitted and postprocess supplies the refusal in the authoritative `done`
+    payload.
     """
 
-    # Larger than the leak window so a detected window is always still held.
+    # Exceeds the leak window so that a detected window is always still held.
     HOLDBACK_CHARS = 160
 
     def __init__(self, system_prompt: str) -> None:
@@ -301,7 +305,7 @@ class StreamScrubber:
         return _matches_leak_corpus(self._text, self._corpus)
 
     def push(self, chunk: str) -> str:
-        """Add model text, return the part now safe to emit."""
+        """Append model text and return the portion now safe to emit."""
         if self.tripped:
             return ""
         self._text += chunk
@@ -314,7 +318,7 @@ class StreamScrubber:
         return out
 
     def flush(self) -> str:
-        """Return the held tail after a final scan. Empty when tripped."""
+        """Return the held tail after a final scan. Empty once tripped."""
         if self.tripped:
             return ""
         if self._dangerous():
@@ -326,8 +330,9 @@ class StreamScrubber:
 
 
 # High-precision signatures only. A false positive refuses a legitimate user
-# with no model recourse, so anything ambiguous stays with the prompt rules.
-# The lookahead keeps shell-help questions about terminal prompts untouched.
+# with no opportunity for model recourse, so ambiguous phrasing is left to
+# the prompt rules. The lookahead exempts shell-help questions about
+# terminal prompts.
 INJECTION_FAST_PATH_RE = re.compile(
     r"(?i)("
     r"ignore\s+all\s+(?:previous|prior|above)\s+instructions"
@@ -342,10 +347,10 @@ INJECTION_FAST_PATH_RE = re.compile(
 
 
 def is_flagrant_injection(query: str) -> bool:
-    """True only for unambiguous jailbreak phrasing worth a canned refusal.
+    """True only for unambiguous jailbreak phrasing warranting a canned refusal.
 
-    This is a cost optimization, not the defense. The prompt rules and the
-    output guard handle everything these signatures miss.
+    This is a cost optimization rather than the defense itself. The prompt
+    rules and the output guard cover everything these signatures miss.
     """
     return bool(INJECTION_FAST_PATH_RE.search(query or ""))
 
@@ -371,10 +376,10 @@ def compute_thought(
     tool_invocations: list[dict[str, Any]],
     response_text: str,
 ) -> Thought:
-    """Deterministically derive confidence + reasoning from the answer context.
+    """Derive confidence and reasoning deterministically from answer context.
 
-    Replaces the model's former self-reported `thought`. Follows the calibration
-    rubric from the system prompt:
+    Replaces the model's former self-reported `thought`, following the
+    calibration rubric stated in the system prompt:
 
     * 0.9+  : an authoritative tool returned data this turn
     * 0.6-0.8: partial tool data, or solid training knowledge
@@ -390,8 +395,8 @@ def compute_thought(
             confidence=0.3,
         )
 
-    # A failed call has a non-empty failure string, so the ok flag is what
-    # separates real data from errors here.
+    # A failed call still produces a non-empty failure string, so the `ok`
+    # flag is what distinguishes returned data from an error.
     tools_returned_data = any(
         inv.get("ok", True)
         and isinstance(inv.get("result"), str)
