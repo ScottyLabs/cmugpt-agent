@@ -6,7 +6,7 @@ nonexistent place fails validation before reaching the guard, which
 revalidates anyway. The tool returns a confirmation string only. The guard in
 agent/cmu_maps.py builds the URL and payload, never the model.
 
-Separate from agent/cmu_maps.py so that module stays framework free.
+Kept separate from agent/cmu_maps.py so that module remains framework-free.
 """
 
 from enum import StrEnum
@@ -31,7 +31,7 @@ class ShowMapArgs(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # The runtime built enum is opaque to ty, which sees a variable rather
+    # The runtime-built enum is opaque to ty, which sees a variable rather
     # than a type. Pydantic and langchain resolve it and emit a plain schema
     # enum of the codes.
     destination: BuildingCode = Field(  # ty: ignore[invalid-type-form]

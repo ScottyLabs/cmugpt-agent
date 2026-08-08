@@ -1,9 +1,9 @@
 """System prompt construction for the CMUGPT agent.
 
-The model produces plain GitHub flavored Markdown with no JSON envelope and
+The model produces plain GitHub-flavored Markdown with no JSON envelope and
 proposes the campus map through the maps_show_map tool. Graph nodes compute
 cmu_maps, services_used, and thought deterministically, so the prompt never
-asks the model for structured output.
+requests structured output from the model.
 """
 
 from collections.abc import Iterable
@@ -13,9 +13,9 @@ from langchain_core.tools import BaseTool
 from .buildings import CURATED_NICKNAMES, LOCATION_ID_TO_LABEL
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups
 
-# Substrings marking a tool as able to return a route between two points
-# rather than locate one building. Matched against tool names so the prompt
-# adapts to whatever the MCP server exposes.
+# Substrings identifying a tool as capable of returning a route between two
+# points rather than locating a single building. Matched against tool names
+# so the prompt adapts to whatever the MCP server exposes.
 _ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
 
 
@@ -27,11 +27,12 @@ def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
 
 
 def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
-    """Directions guidance tailored to routing tool availability.
+    """Directions guidance conditioned on routing-tool availability.
 
-    Without a routing tool the model cannot compute a route and must not
-    invent steps or claim a failed lookup, the attached map is the source
-    of truth. With CMUMaps off there is no map and none may be promised.
+    Without a routing tool the model cannot compute a route and must neither
+    invent steps nor claim a failed lookup, since the attached map is the
+    authoritative source. With CMUMaps disabled there is no map, and none may
+    be promised.
     """
     if not maps_enabled:
         return (
@@ -72,10 +73,10 @@ def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
 def _campus_map_section(maps_enabled: bool) -> str:
     """Rules for the model's map decision, plus the building catalog.
 
-    The model decides when a map belongs on the answer and which buildings it
-    shows by calling maps_show_map. The catalog lets it translate what the
-    user actually said into a real code. The tool schema and the postprocess
-    guard both reject codes outside the list.
+    The model decides when a map belongs on the answer, and which buildings
+    it shows, by calling maps_show_map. The catalog lets it translate what
+    the user said into a real code. Both the tool schema and the postprocess
+    guard reject codes outside the list.
     """
     if not maps_enabled:
         return ""
@@ -109,11 +110,11 @@ def _campus_map_section(maps_enabled: bool) -> str:
 
 
 def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
-    """Tell the model which tool groups the user switched off, if any.
+    """Name the tool groups the user disabled, if any.
 
-    The tools are already gone from the catalog and the bound schemas. This
-    section only lets the model explain why it cannot look something up
-    instead of guessing at the data.
+    The tools are already absent from the catalog and the bound schemas. This
+    section exists solely so the model can explain why a lookup is unavailable
+    rather than guess at the data.
     """
     labels = disabled_group_labels(disabled_tools)
     if not labels:
@@ -136,9 +137,9 @@ def build_system_prompt(
 ) -> str:
     """Compose the system prompt, injecting any discovered MCP tools.
 
-    `tools` is expected to be already filtered (see `mcp_tools.filter_tools`);
-    `disabled_tools` is what was filtered out, used only for the explanatory
-    section above.
+    `tools` is expected to be already filtered (see `mcp_tools.filter_tools`).
+    `disabled_tools` records what was filtered out and is used only for the
+    explanatory section above.
     """
     tool_catalog = "No external tools are available right now."
     if tools:

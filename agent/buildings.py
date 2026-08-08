@@ -1,10 +1,10 @@
 """Building catalog loaded from the committed buildings.json.
 
-buildings.json is a flat code to name map and nothing else. Aliases, the
-reverse index, and single word matches are derived at load time, keeping the
-data file small and editable while scott, scott hall, and donner all resolve.
-The maps app addresses buildings by short code, so resolution always returns
-code and name.
+buildings.json is a flat code-to-name map and nothing else. Aliases, the
+reverse index, and single-word matches are derived at load time, which keeps
+the data file small and editable while still resolving "scott", "scott
+hall", and "donner". The maps app addresses buildings by short code, so
+resolution always returns both code and name.
 """
 
 from __future__ import annotations
@@ -14,8 +14,9 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-# Repo root first, matching the deployed uvicorn working directory, then next
-# to the package for wheel builds that ship buildings.json as package data.
+# The repository root is searched first, matching the deployed uvicorn
+# working directory, then the package directory for wheel builds that ship
+# buildings.json as package data.
 _BUILDINGS_CANDIDATES = (
     Path(__file__).resolve().parents[1] / "buildings.json",
     Path(__file__).resolve().parent / "buildings.json",
@@ -27,7 +28,7 @@ def _buildings_path() -> Path | None:
 
 
 # Trailing words generic enough that the distinctive part alone should also
-# resolve, so scott hall also yields scott.
+# resolve, so "scott hall" additionally yields "scott".
 _GENERIC_SUFFIX = {
     "hall",
     "house",
@@ -66,10 +67,11 @@ _STOPWORDS = _GENERIC_SUFFIX | {
     "for",
     "s",
 }
-# Curated nicknames and disambiguations, each winning over generated
-# mappings. hamerschlag alone means the academic hall, not the dorm.
-# margaret morrison is listed because both its words are shared with MMA,
-# so generation drops them and no two word alias ever exists.
+# Curated nicknames and disambiguations, each taking precedence over
+# generated mappings. "hamerschlag" alone denotes the academic hall, not the
+# dorm. "margaret morrison" is listed because both of its words are shared
+# with MMA, so generation drops them and no two-word alias would otherwise
+# exist.
 _EXTRA_ALIASES: dict[str, str] = {
     "uc": "CUC",
     "university center": "CUC",
@@ -77,8 +79,8 @@ _EXTRA_ALIASES: dict[str, str] = {
     "hamerschlag": "HH",
     "margaret morrison": "MM",
     "maggie mo": "MM",
-    # Well known interiors that students name directly, each mapping to the
-    # building that contains it, the closest thing the map can show.
+    # Well-known interiors that students name directly, each mapping to the
+    # containing building, the closest thing the map can display.
     "sorrells": "WEH",
 }
 
@@ -102,10 +104,10 @@ _FALLBACK_CODE_TO_NAME = {
 
 
 def normalize(text: str) -> str:
-    """Lowercase, fold ampersand to and, reduce punctuation to spaces.
+    """Lowercase, fold ampersand to "and", and reduce punctuation to spaces.
 
-    Used for both alias generation and query matching so the two always live
-    in the same character space.
+    Applied to both alias generation and query matching so the two always
+    operate in the same character space.
     """
     lowered = text.lower().replace("&", " and ")
     lowered = re.sub(r"[^a-z0-9 ]", " ", lowered)
@@ -126,7 +128,9 @@ def _build_index(
         normalized = normalize(name)
         add(normalized, code)  # full name
         if len(code) >= 3:
-            add(code.lower(), code)  # the code itself, two char codes are noise
+            # Two-character codes collide with ordinary words, so only longer
+            # codes register as their own alias.
+            add(code.lower(), code)
         words = normalized.split()
         stripped = words[:]
         while len(stripped) > 1 and stripped[-1] in _GENERIC_SUFFIX:
@@ -137,7 +141,7 @@ def _build_index(
             if token not in _STOPWORDS and len(token) >= 3:
                 single_word_to_codes.setdefault(token, set()).add(code)
 
-    # Register single word aliases only when unambiguous across the catalog.
+    # Single-word aliases register only when unambiguous across the catalog.
     for word, codes in single_word_to_codes.items():
         if len(codes) == 1:
             add(word, next(iter(codes)))
@@ -152,7 +156,7 @@ def _build_index(
         for alias, codes in alias_to_codes.items()
         if len(codes) == 1
     ]
-    # Longest aliases first so scott hall wins over scott.
+    # Longest aliases first, so "scott hall" matches before "scott".
     known.sort(key=lambda item: -len(item[0]))
     return known, dict(code_to_name)
 
@@ -179,7 +183,7 @@ _known, LOCATION_ID_TO_LABEL = load_location_index()
 KNOWN_CMU_LOCATIONS: list[tuple[str, str, str]] = list(_known)
 
 # Curated nicknames exported for the system prompt. The model resolves what
-# users say, so it must be told slang the formal names do not carry.
+# users say, so it must be informed of slang the formal names do not carry.
 CURATED_NICKNAMES: list[tuple[str, str]] = sorted(
     (alias, code) for alias, code in _EXTRA_ALIASES.items()
 )

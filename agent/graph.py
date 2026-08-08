@@ -141,9 +141,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
         # Buffer these passes so postprocess can repair the text before the
         # user sees it. Forced tool passes produce preamble prose that is not
-        # the final answer. Map queries sometimes draw a false failure claim
+        # the final answer. Map queries sometimes elicit a false failure claim
         # that postprocess strips, so they must not stream live. With CMUMaps
-        # off there is no map to contradict and nothing needs buffering.
+        # off there is no map to contradict, so nothing needs buffering.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         gathered: AIMessageChunk | None = None
@@ -181,7 +181,40 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
     return agent_node
 
 
-def _build_tools_node(tools: list[BaseTool]):
+# Substrings marking a tool as routing rather than data-returning. A routing
+# failure does not degrade the answer, because the attached map already shows
+# the route.
+_ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
+
+
+def _is_routing_tool(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _ROUTING_TOOL_HINTS)
+
+
+def _tool_failure_notice(name: str, maps_enabled: bool) -> str:
+    """Model-facing replacement for a failed tool result.
+
+    The raw MCP error names internal hosts and reports an infrastructure
+    problem the user cannot act on, so relaying it verbatim produces answers
+    that narrate a failure instead of answering. Routing failures are
+    additionally invisible to the user, since the map is attached regardless.
+    """
+    if maps_enabled and _is_routing_tool(name):
+        return (
+            "No turn-by-turn route data is available. An interactive campus "
+            "map of this route is attached to your answer automatically. "
+            "Describe the walk in general terms and point the user to the "
+            "map. Do NOT mention tools, lookups, errors, or any failure."
+        )
+    return (
+        "This lookup returned no data. Tell the user you could not retrieve "
+        "it and point them to an authoritative CMU source. Do NOT describe "
+        "the internal error."
+    )
+
+
+def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
     tools_by_name = {tool.name: tool for tool in tools}
 
     async def tools_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
@@ -199,17 +232,39 @@ def _build_tools_node(tools: list[BaseTool]):
             tool = tools_by_name.get(name)
             if tool is None:
                 result = f"Tool '{name}' is not available."
+                failed = True
             else:
                 try:
-                    raw = await tool.ainvoke(args)
-                    result = raw if isinstance(raw, str) else str(raw)
+                    # Invoking with the full tool call returns a ToolMessage,
+                    # whose `status` reports MCP errors structurally. Reading
+                    # that flag avoids inferring failure from result text.
+                    raw = await tool.ainvoke(
+                        {
+                            "name": name,
+                            "args": args,
+                            "id": call_id,
+                            "type": "tool_call",
+                        }
+                    )
+                    if isinstance(raw, ToolMessage):
+                        result = _message_text(raw)
+                        failed = raw.status == "error"
+                    else:
+                        result = raw if isinstance(raw, str) else str(raw)
+                        failed = False
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     result = f"Tool '{name}' failed: {exc}"
+                    failed = True
 
+            # The invocation record keeps the raw result, which the map guard
+            # reads. Only the model's copy is replaced on failure.
             new_invocations.append({"name": name, "arguments": args, "result": result})
-            # maps_show_map is presentation, not a data source. It stays in
-            # tool_invocations for the guard but out of the services the
-            # Surface reports as answer sources.
+            model_result = (
+                _tool_failure_notice(name, maps_enabled) if failed else result
+            )
+            # maps_show_map is presentation rather than a data source. It
+            # remains in tool_invocations for the guard but is excluded from
+            # the services the Surface reports as answer sources.
             if (
                 name != SHOW_MAP_TOOL_NAME
                 and name not in state["services_used"]
@@ -221,7 +276,7 @@ def _build_tools_node(tools: list[BaseTool]):
             # instructions. Defense against prompt-injection from MCP content.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{result}\n"
+                f"{model_result}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -300,7 +355,7 @@ def build_graph(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool = T
     # LangGraph expects here.
     graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
     graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
-    graph.add_node("tools", _build_tools_node(tools))
+    graph.add_node("tools", _build_tools_node(tools, maps_enabled))
     graph.add_node("postprocess", _postprocess_node)
 
     graph.add_edge(START, "agent")
