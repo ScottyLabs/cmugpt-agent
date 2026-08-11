@@ -146,6 +146,87 @@ async def _test_forget_removes_best_match() -> None:
     assert_true("No matching" in miss, "weak match is a no-op")
 
 
+async def _test_forget_tool_scales_from_one_to_everything() -> None:
+    store = _indexed_store()
+    tools = memory.build_memory_tools(store, "u1")
+    forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
+
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Prefers window seats")
+    await memory.add_fact(store, "u1", "Majors in ECE")
+
+    # Several facts in one call without confirmation: nothing is removed and
+    # the would-be deletions are reported for the user to confirm.
+    preview = await forget_tool.ainvoke(
+        {"facts": ["allergic to peanuts", "prefers window seats"]}
+    )
+    assert_true("Nothing was forgotten yet" in preview, "multi-delete asks first")
+    assert_true(
+        "Allergic to peanuts" in preview and "window seats" in preview,
+        "the confirmation preview names what is at stake",
+    )
+    assert_equal(
+        len(await memory.list_facts(store, "u1")), 3, "unconfirmed call deletes nothing"
+    )
+
+    # The same call with confirmed=true removes the named facts, reporting an
+    # entry that matches nothing.
+    multi = await forget_tool.ainvoke(
+        {
+            "facts": ["allergic to peanuts", "prefers window seats", "owns a boat"],
+            "confirmed": True,
+        }
+    )
+    assert_true("Allergic to peanuts" in multi, "first removal is reported")
+    assert_true("window seats" in multi, "second removal is reported")
+    assert_true("no close match" in multi, "the unmatched entry is reported")
+    remaining = await memory.list_facts(store, "u1")
+    assert_equal(len(remaining), 1, "exactly the named facts were removed")
+
+    # Everything: wipes the store and reports the count.
+    receipt = await forget_tool.ainvoke({"everything": True})
+    assert_true("Forgot all 1" in receipt, "clear-all reports the count")
+    assert_equal(await memory.list_facts(store, "u1"), [], "all facts removed")
+
+    # Clearing an empty store and calling with no arguments are both no-ops.
+    empty = await forget_tool.ainvoke({"everything": True})
+    assert_true("No matching" in empty, "clearing nothing is a no-op")
+    noargs = await forget_tool.ainvoke({})
+    assert_true("No matching" in noargs, "no arguments is a no-op")
+
+    # A single fact is just a one-entry list.
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    single = await forget_tool.ainvoke({"facts": ["allergic to peanuts"]})
+    assert_true("Forgot" in single, "single-fact forget still works")
+
+
+async def _test_forget_asks_when_ambiguous() -> None:
+    store = _indexed_store()
+    tools = memory.build_memory_tools(store, "u1")
+    forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
+
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Allergic to shellfish")
+
+    # A query matching both facts equally must delete nothing and surface
+    # the candidates so the model can ask the user to choose.
+    reply = await forget_tool.ainvoke({"facts": ["allergic"]})
+    assert_true(
+        "several remembered facts could match" in reply,
+        "ambiguous request reports the candidates",
+    )
+    assert_true("peanuts" in reply and "shellfish" in reply, "both candidates named")
+    items = await memory.list_facts(store, "u1")
+    assert_equal(len(items), 2, "nothing was deleted on ambiguity")
+
+    # A confirmed exact restatement deletes only the chosen fact.
+    confirmed = await forget_tool.ainvoke({"facts": ["Allergic to peanuts"]})
+    assert_true("Forgot: Allergic to peanuts" in confirmed, "exact quote deletes")
+    remaining = await memory.list_facts(store, "u1")
+    assert_equal(len(remaining), 1, "only the confirmed fact was removed")
+    assert_true("shellfish" in remaining[0]["text"], "the other fact survives")
+
+
 async def _test_memory_tools_write_to_namespace() -> None:
     store = _indexed_store()
     tools = memory.build_memory_tools(store, "u1")
@@ -410,18 +491,6 @@ def _test_prompt_memory_section() -> None:
     )
 
 
-def _test_worth_extracting_gate() -> None:
-    assert_true(
-        memory._worth_extracting("I'm a junior studying design"),
-        "personal statement passes the gate",
-    )
-    assert_true(
-        not memory._worth_extracting("where is gates building"),
-        "impersonal lookup is skipped",
-    )
-    assert_true(not memory._worth_extracting("hi"), "trivial turn is skipped")
-
-
 def _test_parse_facts_is_tolerant() -> None:
     assert_equal(memory._parse_facts('["a", "b"]'), ["a", "b"], "plain array")
     assert_equal(
@@ -438,6 +507,8 @@ async def _run_async() -> None:
     await _test_dedup_skips_duplicates()
     await _test_explicit_save_promotes_learned_duplicate()
     await _test_forget_removes_best_match()
+    await _test_forget_tool_scales_from_one_to_everything()
+    await _test_forget_asks_when_ambiguous()
     await _test_memory_tools_write_to_namespace()
     await _test_user_id_wildcard_cannot_cross_read()
     await _test_recall_without_index_degrades()
@@ -452,7 +523,6 @@ async def _run_async() -> None:
 
 def run() -> None:
     asyncio.run(_run_async())
-    _test_worth_extracting_gate()
     _test_parse_facts_is_tolerant()
     _test_prompt_memory_section()
     _test_learn_rate_limit()

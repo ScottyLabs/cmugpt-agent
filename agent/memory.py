@@ -78,7 +78,7 @@ _RECALL_FACTS = 8
 _DEDUP_SCORE = 0.92
 # Below this score a "forget" request is a no-op, so asking to forget an
 # unstored fact cannot delete its nearest stored neighbor.
-_FORGET_FLOOR = 0.5
+_FORGET_FLOOR = 0.30
 
 # Per-user growth cap. Recall injects only the top matches, so a large
 # store costs storage rather than tokens. The cap exists to stop scripted,
@@ -92,10 +92,7 @@ _MAX_FACTS: int = 1000
 _CAP_CHECK_EVERY: int = 20
 
 # Budget for the background learn() pass, which costs one extraction LLM
-# call plus embedding writes per turn. A per-user minimum gap plus an
-# hourly ceiling stops scripted abuse while leaving normal chat cadence
-# unaffected.
-_LEARN_MIN_INTERVAL_SECONDS = 10.0
+_LEARN_MIN_INTERVAL_SECONDS = 2.0
 _LEARN_MAX_PER_HOUR = 60
 
 # Postgres connection pool size. Without a pool, langgraph shares one
@@ -400,23 +397,27 @@ async def _enforce_cap(
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
-def _keyword_best_match(items: list[SearchItem], query: str) -> SearchItem | None:
+def _keyword_matches(items: list[SearchItem], query: str) -> list[SearchItem]:
     """Fallback matcher for unindexed stores: content-word overlap.
 
-    Returns None when nothing overlaps, so an unrelated "forget" request never
-    deletes an arbitrary memory.
+    Returns the best-overlapping facts first, with every fact tied for the
+    top overlap included, so the caller can tell a clear winner from an
+    ambiguous request. Empty when nothing overlaps, so an unrelated "forget"
+    request never deletes an arbitrary memory.
     """
     query_words = {w for w in _WORD_RE.findall(query.lower()) if len(w) >= 3}
     if not query_words:
-        return None
-    best: SearchItem | None = None
-    best_overlap = 0
+        return []
+    scored: list[tuple[int, SearchItem]] = []
     for item in items:
         fact_words = {w for w in _WORD_RE.findall(_text(item).lower()) if len(w) >= 3}
         overlap = len(query_words & fact_words)
-        if overlap > best_overlap:
-            best, best_overlap = item, overlap
-    return best
+        if overlap > 0:
+            scored.append((overlap, item))
+    if not scored:
+        return []
+    best = max(overlap for overlap, _ in scored)
+    return [item for overlap, item in scored if overlap == best]
 
 
 # --------------------------------------------------------------------------- #
@@ -520,22 +521,87 @@ async def add_fact(
     return key, "saved"
 
 
+# Two candidates whose scores differ by less than this are considered
+# equally plausible referents, so nothing is deleted and the caller is told
+# to ask the user which fact they mean.
+_FORGET_AMBIGUITY_GAP = 0.10
+
+
+def _ambiguity_message(candidates: list[SearchItem]) -> str:
+    # The "No matching memory" prefix marks this as a non-deletion for the
+    # event layer, which suppresses the removed-memory chip.
+    listing = "; ".join(f"'{_text(item)}'" for item in candidates[:3])
+    return (
+        "No matching memory was forgotten: several remembered facts could "
+        f"match: {listing}. Ask the user which one they mean, then call "
+        "forget again quoting that fact exactly."
+    )
+
+
+async def resolve_forget_targets(
+    store: BaseStore, user_id: str, queries: list[str]
+) -> list[str]:
+    """Dry-run of :func:`forget`: the fact texts the queries would remove.
+
+    Uses the same matching rules as forget but deletes nothing, so a
+    confirmation prompt can show the user exactly what is at stake.
+    Ambiguous queries contribute all of their candidates.
+    """
+    namespace = (user_id, _FACTS)
+    texts: list[str] = []
+
+    def add(item: SearchItem) -> None:
+        text = _text(item)
+        if text and text not in texts:
+            texts.append(text)
+
+    for query in queries:
+        if _has_index(store):
+            matches = await _search(store, namespace, query, 4)
+            for item in matches:
+                if (item.score or 0.0) >= _FORGET_FLOOR:
+                    add(item)
+        else:
+            pool = await _search(store, namespace, None, _MAX_FACTS)
+            for item in _keyword_matches(pool, query):
+                add(item)
+    return texts
+
+
 async def forget(store: BaseStore, user_id: str, query: str) -> str:
     """Delete the single fact most similar to ``query``.
 
     A weak best match (below the floor, or no keyword overlap when unindexed)
-    is treated as "nothing to remove", never a deletion.
+    is treated as "nothing to remove", never a deletion. When several stored
+    facts are equally plausible referents, nothing is deleted and the
+    candidates are reported so the user can be asked which one they mean. An
+    exact restatement of a fact always deletes that fact.
     """
     namespace = (user_id, _FACTS)
+    normalized_query = " ".join(query.split()).lower()
     item: SearchItem | None
     if _has_index(store):
-        matches = await _search(store, namespace, query, 1)
-        item = matches[0] if matches else None
-        if item is not None and (item.score or 0.0) < _FORGET_FLOOR:
-            item = None
+        matches = await _search(store, namespace, query, 4)
+        candidates = [m for m in matches if (m.score or 0.0) >= _FORGET_FLOOR]
+        item = candidates[0] if candidates else None
+        exact = item is not None and _text(item).lower() == normalized_query
+        if (
+            item is not None
+            and not exact
+            and len(candidates) > 1
+            and ((item.score or 0.0) - (candidates[1].score or 0.0))
+            < _FORGET_AMBIGUITY_GAP
+        ):
+            return _ambiguity_message(candidates)
     else:
-        candidates = await _search(store, namespace, None, _MAX_FACTS)
-        item = _keyword_best_match(candidates, query)
+        pool = await _search(store, namespace, None, _MAX_FACTS)
+        tied = _keyword_matches(pool, query)
+        exact_matches = [i for i in tied if _text(i).lower() == normalized_query]
+        if exact_matches:
+            tied = exact_matches[:1]
+        if len(tied) > 1:
+            return _ambiguity_message(tied)
+        item = tied[0] if tied else None
     if item is None:
         return "No matching memory found to forget."
     await store.adelete(namespace, item.key)
@@ -559,9 +625,30 @@ class _RememberArgs(BaseModel):
 
 
 class _ForgetArgs(BaseModel):
-    query: str = Field(
-        ...,
-        description="Describe the remembered fact the user wants removed.",
+    facts: list[str] | None = Field(
+        default=None,
+        description=(
+            "The remembered facts to remove, one entry per fact, each "
+            "quoted or closely paraphrased (for example 'lives in Mudge "
+            "House', not 'where I live'). Omit when everything is true."
+        ),
+    )
+    everything: bool = Field(
+        default=False,
+        description=(
+            "Set true ONLY when the user asks to forget everything you "
+            "know about them, including 'forget all that' after seeing "
+            "their remembered facts."
+        ),
+    )
+    confirmed: bool = Field(
+        default=False,
+        description=(
+            "Required when facts has more than one entry. Set true ONLY "
+            "when the user themselves named each of these facts, or has "
+            "just answered a question from you confirming exactly which "
+            "facts to forget. Never set it on your own inference."
+        ),
     )
 
 
@@ -592,8 +679,60 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
             fact=normalized_fact,
         )
 
-    async def _forget(query: str) -> str:
-        return await forget(store, user_id, query)
+    async def _forget(
+        facts: list[str] | None = None,
+        everything: bool = False,
+        confirmed: bool = False,
+    ) -> str:
+        if everything:
+            removed = await clear_memory(store, user_id)
+            if removed == 0:
+                return "No matching memory found to forget."
+            return f"Forgot all {removed} remembered facts about this user."
+        queries = [q for q in (facts or []) if isinstance(q, str) and q.strip()]
+        if not queries:
+            return "No matching memory found to forget."
+        # Removing several facts at once requires the user's explicit
+        # confirmation. The prompt alone cannot enforce this: a model can
+        # read a singular request ("forget my allergy") as a category and
+        # expand it to every matching fact, so the tool refuses instead and
+        # reports what would be removed.
+        if len(queries) > 1 and not confirmed:
+            resolved = await resolve_forget_targets(store, user_id, queries)
+            if not resolved:
+                return "No matching memory found to forget."
+            listing = "; ".join(f"'{text}'" for text in resolved)
+            return (
+                f"Nothing was forgotten yet. This would remove: {listing}. "
+                "Confirm with the user exactly which of these to forget, "
+                "then call forget again with confirmed=true."
+            )
+        forgotten: list[str] = []
+        ambiguous: list[str] = []
+        unmatched = 0
+        for q in queries:
+            message = await forget(store, user_id, q)
+            if message.startswith("Forgot: "):
+                text = message.removeprefix("Forgot: ")
+                if text not in forgotten:
+                    forgotten.append(text)
+            elif "several remembered facts could match" in message:
+                ambiguous.append(message)
+            else:
+                unmatched += 1
+        if not forgotten:
+            # Ambiguity outranks a plain no-match: the model must ask the
+            # user which fact they meant rather than report failure.
+            return ambiguous[0] if ambiguous else "No matching memory found to forget."
+        summary = "Forgot: " + "; ".join(forgotten)
+        if ambiguous:
+            summary += " Also: " + ambiguous[0]
+        if unmatched:
+            summary += (
+                f" ({unmatched} other requested "
+                f"fact{'s' if unmatched > 1 else ''} had no close match)"
+            )
+        return summary
 
     return [
         StructuredTool.from_function(
@@ -613,8 +752,10 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
             name=FORGET_TOOL,
             metadata={INTERNAL_MEMORY_METADATA: True},
             description=(
-                "Remove a previously remembered fact about the user. Call this "
-                "when the user asks you to forget something about them."
+                "Remove remembered facts about the user. Pass `facts` with "
+                "one entry per fact to remove, quoting or closely "
+                "paraphrasing each. When the user asks to forget everything "
+                "you know about them, set `everything` to true instead."
             ),
             args_schema=_ForgetArgs,
         ),
@@ -625,21 +766,8 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
 # Write path: background extraction
 # --------------------------------------------------------------------------- #
 
-_PERSONAL_RE = re.compile(
-    r"\b(i|i'm|im|i am|i've|my|mine|me|myself|we|our|call me|i'd|i would|"
-    r"i prefer|i like|i love|i hate|i need|i want|i use|i live|i study|"
-    r"i major|i work|remember|don't forget)\b",
-    re.IGNORECASE,
-)
-
-
-def _worth_extracting(text: str) -> bool:
-    """Inexpensive gate: trivial turns skip the extraction LLM call."""
-    stripped = text.strip()
-    if len(stripped) < 12:
-        return False
-    return bool(_PERSONAL_RE.search(stripped))
-
+# The extraction model reads the exchange and returns an empty list when
+# nothing durable was said.
 
 _EXTRACTION_SYSTEM = (
     "You maintain a long-term memory of durable facts about a user across "
@@ -683,7 +811,7 @@ def _learn_allowed(user_id: str, *, now: float | None = None) -> bool:
 
 
 def _extraction_model_name() -> str:
-    return os.getenv("MEMORY_EXTRACTION_MODEL", "openai/gpt-4o-mini")
+    return os.getenv("MEMORY_EXTRACTION_MODEL", "qwen/qwen3.7-flash")
 
 
 @lru_cache(maxsize=4)
@@ -735,7 +863,7 @@ async def learn(
 
     Best-effort, run off the response path, rate-limited per user.
     """
-    if not _worth_extracting(user_text):
+    if not user_text.strip():
         return
     if not _learn_allowed(user_id):
         return

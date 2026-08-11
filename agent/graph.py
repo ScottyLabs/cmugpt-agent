@@ -214,14 +214,33 @@ def _needs_data_tools(
     )
 
 
-def _needs_memory_tools(query: str) -> bool:
+_MEMORY_CONTEXT_TURNS = 5
+
+
+def _recent_history_texts(
+    message_history: list[dict[str, str]] | None,
+) -> list[str]:
+    if not message_history:
+        return []
+    return [
+        turn["content"]
+        for turn in message_history[-_MEMORY_CONTEXT_TURNS:]
+        if isinstance(turn.get("content"), str)
+    ]
+
+
+def _needs_memory_tools(query: str, history_texts: list[str] | None = None) -> bool:
     """True when the model needs explicit remember/forget tools this turn."""
-    return bool(_MEMORY_TOOL_RE.search(query))
+    if _MEMORY_TOOL_RE.search(query):
+        return True
+    return any(_MEMORY_TOOL_RE.search(text) for text in history_texts or [])
 
 
-def _needs_memory_recall(query: str) -> bool:
+def _needs_memory_recall(query: str, history_texts: list[str] | None = None) -> bool:
     """True when recalled user memory is likely to change the answer."""
-    return bool(_MEMORY_RECALL_RE.search(query))
+    if _MEMORY_RECALL_RE.search(query):
+        return True
+    return any(_MEMORY_RECALL_RE.search(text) for text in history_texts or [])
 
 
 def _had_tool_round(messages: list[AnyMessage]) -> bool:
@@ -373,8 +392,12 @@ def _build_tools_node(tools: list[BaseTool]):
                 # confirmations, so they are never listed as user-facing
                 # services. The Surface renders the `memory` event as a
                 # chip, shown only when stored memory actually changed.
-                no_op_forget = name == FORGET_TOOL and result.startswith(
-                    "No matching memory"
+                # A forget call that removed nothing (no match, ambiguity,
+                # or awaiting the user's confirmation) must not emit the
+                # removed-memory chip.
+                no_op_forget = name == FORGET_TOOL and (
+                    result.startswith("No matching memory")
+                    or result.startswith("Nothing was forgotten yet")
                 )
                 if not memory_op_failed and not no_op_forget:
                     event_data: dict[str, Any] = {
@@ -599,8 +622,9 @@ async def _prepare_tools_and_store(
     user_id = user_input.user_id
 
     needs_data_tools = _needs_data_tools(query, message_history)
-    needs_memory_tools = bool(user_id) and _needs_memory_tools(query)
-    recall_enabled = bool(user_id) and _needs_memory_recall(query)
+    recent_texts = _recent_history_texts(message_history)
+    needs_memory_tools = bool(user_id) and _needs_memory_tools(query, recent_texts)
+    recall_enabled = bool(user_id) and _needs_memory_recall(query, recent_texts)
     maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
 
     tools: list[BaseTool] = []
