@@ -37,9 +37,9 @@ from agent.memory import (
 
 logger = logging.getLogger(__name__)
 
-# Input caps: these payloads flow straight into LLM calls (token cost) and,
-# for user_id, into per-user database namespaces - so none of them may be
-# caller-controlled without bounds.
+# Upper bounds on request input. Query and history text is sent to the
+# model, where longer input costs more tokens, and user_id becomes each
+# user's storage namespace, so none of these values may arrive unbounded.
 _MAX_QUERY_CHARS = 8_000
 _MAX_USER_ID_CHARS = 128
 _MAX_HISTORY_MESSAGES = 40
@@ -56,7 +56,8 @@ def _is_production() -> bool:
 
 
 def _validate_runtime_configuration() -> None:
-    """Fail closed when a production deployment lacks durability or auth."""
+    """Refuse to start a production deployment that is missing its database
+    or its shared secret, rather than run without durable memory or auth."""
     if not _is_production():
         return
     missing = [
@@ -83,7 +84,8 @@ def _validate_runtime_configuration() -> None:
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Set up the memory store on startup. Drain and close it on shutdown."""
+    """Open the memory store when the app starts. On shutdown, wait for any
+    background memory writes to finish, then close the store."""
     _validate_runtime_configuration()
     if not os.getenv("AGENT_SHARED_SECRET"):
         logger.warning(
@@ -128,12 +130,13 @@ def _require_shared_secret(
 ) -> None:
     expected = os.getenv("AGENT_SHARED_SECRET")
     if not expected:
-        return  # auth disabled (dev only; the lifespan logs a warning)
+        return  # Auth is disabled, which only local development should do.
     token_ok = (
         creds is not None
         and creds.scheme.lower() == "bearer"
-        # Constant-time comparison: `!=` short-circuits on the first differing
-        # byte, which leaks secret prefixes through response timing.
+        # Compared in constant time. An ordinary `!=` stops at the first
+        # wrong character, and that timing difference can reveal the secret
+        # one prefix at a time.
         and secrets.compare_digest(
             creds.credentials.encode("utf-8"), expected.encode("utf-8")
         )
@@ -147,7 +150,7 @@ def _require_shared_secret(
 
 @app.exception_handler(HTTPException)
 async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    """Emit both `error` and `detail` so legacy + modern clients both work."""
+    """Emit both `error` and `detail` so older and newer clients both work."""
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
     return JSONResponse(
         status_code=exc.status_code,
@@ -175,9 +178,11 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     user_id = candidate.get("user_id")
     if user_id is not None and not isinstance(user_id, str):
         raise ValueError("'user_id' must be a string if provided.")
-    # user_id becomes a per-user database namespace matched with an unescaped
-    # SQL LIKE, so it must exclude wildcard/separator characters - not merely be
-    # printable. is_valid_user_id enforces the safe allowlist.
+    # user_id becomes the key that separates one user's stored memory from
+    # another's, and the database matches it as a pattern rather than
+    # literally. Characters with special meaning there must be excluded, so
+    # is_valid_user_id enforces a strict allowlist rather than accepting any
+    # printable string.
     if user_id is not None and not is_valid_user_id(user_id):
         raise ValueError(
             "'user_id' must match [A-Za-z0-9@:+=~-] and be at most "
@@ -193,10 +198,11 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _parse_disabled_tools_value(raw: Any) -> list[str]:
-    """Tool groups the Surface says the user switched off.
+    """Tool groups the Surface reports the user disabled.
 
-    Unknown group ids are dropped by the agent rather than rejected here, so a
-    Surface that gains a new switch before the agent knows about it still works.
+    Unknown group ids are dropped by the agent rather than rejected here, so
+    a Surface that gains a new toggle before the agent recognizes it
+    continues to function.
     """
     if raw is None:
         return []
@@ -224,8 +230,8 @@ def _parse_request(
             detail="Request body must be a JSON object.",
         )
 
-    # Optional fields may ride inside the {"data": {...}} wrapper or at the
-    # top level beside it. Both shapes are in use.
+    # Optional fields may appear inside the {"data": {...}} wrapper or at
+    # the top level beside it. Callers use both shapes.
     wrapper: Any = payload.get("data", payload)
     if not isinstance(wrapper, Mapping):
         wrapper = payload
@@ -271,9 +277,10 @@ def _parse_request(
                     "'content' field."
                 ),
             )
-        # History flows verbatim into the LLM call: cap turns and per-message
-        # size so a single request can't carry an unbounded token bill. Trimming
-        # (rather than rejecting) mirrors normal context-window truncation.
+        # History is sent to the model as-is, so both the number of turns
+        # and the size of each message are capped to keep one request from
+        # carrying an unbounded token cost. Oversized history is trimmed
+        # rather than rejected, matching how context windows truncate.
         message_history = [
             {
                 "role": str(item["role"]),
@@ -296,9 +303,10 @@ _ready_cache: tuple[float, bool] | None = None
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    # `memory.backend` answers "did this deploy get Postgres?" in one request.
-    # The readiness probe runs a real store query. Cache it briefly so this
-    # unauthenticated endpoint cannot become a DB load generator.
+    # The memory block reports which backend this deployment is using and
+    # whether it is answering queries. The readiness probe runs a real store
+    # query, so the result is cached briefly to keep this unauthenticated
+    # endpoint from generating database load.
     global _ready_cache
     now = time.monotonic()
     if _ready_cache is not None and now - _ready_cache[0] < _READY_TTL_SECONDS:
@@ -404,7 +412,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
 
 
 def _require_valid_user_id(user_id: str) -> None:
-    """Reject path-param user ids that aren't safe as a memory namespace key."""
+    """Reject path-param user ids that are unsafe as a memory namespace key."""
     if not is_valid_user_id(user_id):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,

@@ -92,8 +92,9 @@ class AgentState(TypedDict):
     disabled_tools: list[str]
 
 
-# Background memory-extraction tasks are fire-and-forget. Hold references so the
-# event loop doesn't garbage-collect them before they finish.
+# Background memory-extraction tasks run detached from the response. Python
+# discards a task nothing refers to, so references are held here until each
+# task completes.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -188,8 +189,9 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
     )
 
 
-# Follow-ups like "what about Wean?" rarely repeat a data keyword. Scan the
-# last few user turns too, so a thread that needed tools keeps them.
+# A follow-up such as "what about Wean?" rarely repeats a data keyword, so
+# the last few user turns are scanned as well. A conversation that needed
+# tools then keeps them.
 _HISTORY_GATE_TURNS = 4
 
 
@@ -234,19 +236,20 @@ def _had_tool_round(messages: list[AnyMessage]) -> bool:
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
-    # Forcing a tool is only about CMU data lookups. Memory tools never count.
-    # Identity comes from build_memory_tools' metadata marker, not the name,
-    # so an MCP tool named "remember" still counts as data.
+    # Forcing a tool call applies only to CMU data lookups, so memory tools
+    # are not counted. A tool is recognized as a memory tool by the marker
+    # build_memory_tools sets, never by its name, so an MCP tool that
+    # happens to be named "remember" still counts as a data tool.
     has_data_tools = any(not is_internal_memory_tool(tool) for tool in tools)
 
     async def agent_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
         query = state["query"]
-        # Force a tool call only while the full toolset is bound: with a group
-        # switched off, `tool_choice="required"` could coerce an unrelated
-        # tool, wasting a call and misreporting how the answer was sourced.
-        # The latch must count memory-only rounds too. services_used stays
-        # empty for those, and a still-forced second pass would coerce an
-        # unrelated data call or loop to the recursion limit.
+        # A tool call is forced only while the full toolset is bound. With a
+        # group disabled, `tool_choice="required"` could push the model into
+        # an unrelated tool, wasting a call and misreporting how the answer
+        # was sourced. The latch must also count memory-only rounds, since
+        # services_used stays empty for those, and a second forced pass
+        # would again pick an unrelated tool or loop to the recursion limit.
         force_tool = (
             has_data_tools
             and not normalize_disabled_groups(state.get("disabled_tools"))
@@ -306,8 +309,9 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
 def _build_tools_node(tools: list[BaseTool]):
     tools_by_name = {tool.name: tool for tool in tools}
-    # Tools this request built via build_memory_tools. Only these are trusted.
-    # An MCP tool merely named "remember" stays untrusted below.
+    # Tools this request built via build_memory_tools. Only these are
+    # trusted. An MCP tool that is merely named "remember" remains
+    # untrusted below.
     internal_memory_names = {
         tool.name for tool in tools if is_internal_memory_tool(tool)
     }
@@ -355,8 +359,9 @@ def _build_tools_node(tools: list[BaseTool]):
                         result = raw if isinstance(raw, str) else str(raw)
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     if is_memory_tool:
-                        # Raw exception text can leak DSN fragments. Log it,
-                        # send a generic message onward.
+                        # Raw exception text can expose database connection
+                        # details. The full error is logged and a generic
+                        # message is sent onward.
                         logger.warning("memory tool %s failed", name, exc_info=True)
                         result = "The memory operation failed; nothing was changed."
                         memory_op_failed = True
@@ -364,10 +369,10 @@ def _build_tools_node(tools: list[BaseTool]):
                         result = f"Tool '{name}' failed: {exc}"
 
             if is_memory_tool:
-                # Internal tools: results are our own trusted confirmations,
-                # never listed as user-facing services. The Surface renders
-                # the `memory` event as a chip.
-                # Chip only when stored memory actually changed.
+                # Internal tool results are this module's own trusted
+                # confirmations, so they are never listed as user-facing
+                # services. The Surface renders the `memory` event as a
+                # chip, shown only when stored memory actually changed.
                 no_op_forget = name == FORGET_TOOL and result.startswith(
                     "No matching memory"
                 )
@@ -446,9 +451,10 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     if parsed.cmu_maps.url:
         writer({"event": "map", "data": parsed.cmu_maps.model_dump()})
 
-    # Schedule the learn task BEFORE emitting `done`: clients often disconnect
-    # right after the final event, which cancels the graph, and the task must
-    # already exist by then or memories are silently never learned.
+    # The learn task is scheduled BEFORE `done` is emitted. Clients often
+    # disconnect right after the final event, which cancels the graph, and
+    # the task must already exist by then or memories are silently never
+    # learned.
     user_id = state.get("user_id")
     if user_id and parsed.response_text:
         task = asyncio.create_task(_safe_learn(user_id, query, parsed.response_text))

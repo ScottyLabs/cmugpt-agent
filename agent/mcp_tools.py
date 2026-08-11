@@ -91,11 +91,11 @@ def filter_tools(
     return [tool for tool in tools if tool_group(tool.name or "") not in groups]
 
 
-# Tool discovery is a network round-trip to the MCP server, so cache the result
-# instead of paying it on every request. The returned tools are self-contained
-# (each invocation opens its own session), which is what makes reuse safe.
-# Failures are cached briefly too, so a down server isn't hammered but service
-# recovers quickly.
+# Tool discovery is a network round-trip to the MCP server, so the result is
+# cached rather than paid on every request. The returned tools are
+# self-contained (each invocation opens its own session), which is what makes
+# reuse safe. Failures are cached briefly as well, so an unreachable server is
+# not polled on every request yet service recovers quickly.
 _CACHE_TTL_SECONDS = 60.0
 _FAILURE_TTL_SECONDS = 15.0
 

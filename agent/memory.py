@@ -57,10 +57,11 @@ def is_internal_memory_tool(tool: BaseTool) -> bool:
 _FACTS = "facts"
 _EPISODES = "episodes"  # legacy cleanup only; new raw chat turns are never stored
 
-# The user_id becomes the store's namespace key, which langgraph matches with
-# an unescaped SQL LIKE prefix. This allowlist excludes the LIKE wildcards
-# ("%", "_") and the namespace separator ".", so a hostile user_id can never
-# match another user's namespace. Checked at every entry point.
+# The user_id becomes the key that separates each user's stored memory.
+# LangGraph matches that key as a SQL LIKE pattern without escaping, so the
+# allowlist excludes the pattern wildcards ("%", "_") and the separator
+# ".". A hostile user_id therefore cannot match another user's namespace.
+# Checked at every entry point.
 _USER_ID_RE = re.compile(r"^[A-Za-z0-9@:+=~-]{1,128}$")
 
 
@@ -69,7 +70,8 @@ def is_valid_user_id(user_id: str | None) -> bool:
     return bool(user_id) and bool(_USER_ID_RE.match(user_id))
 
 
-# Facts injected per turn. Top-k only, to keep the prompt small.
+# Number of facts injected per turn. Only the most relevant few are used,
+# to keep the prompt small.
 _RECALL_FACTS = 8
 
 # A fact is a near-duplicate of an existing one at/above this cosine score.
@@ -78,24 +80,26 @@ _DEDUP_SCORE = 0.92
 # unstored fact cannot delete its nearest stored neighbor.
 _FORGET_FLOOR = 0.5
 
-# Per-user growth cap. Recall injects only top-k facts, so a large store costs
-# storage, not tokens. The cap exists to stop scripted unbounded growth. Past
-# it, writes evict via _eviction_order: auto-extracted facts first, oldest
-# first.
+# Per-user growth cap. Recall injects only the top matches, so a large
+# store costs storage rather than tokens. The cap exists to stop scripted,
+# unbounded growth. Beyond it, writes evict in _eviction_order:
+# auto-extracted facts first, oldest first.
 _MAX_FACTS: int = 1000
 
-# Cap checks scan the namespace, so amortize: first write per namespace (per
-# process), then every Nth write. Brief overshoot between checks is harmless.
+# A cap check scans the whole namespace, so it runs on the first write per
+# namespace in each process and then every Nth write. Briefly exceeding the
+# cap between checks is harmless.
 _CAP_CHECK_EVERY: int = 20
 
-# Budget for the background learn() pass (an extraction LLM call plus embedding
-# writes per turn). Per-user floor plus hourly ceiling stops scripted abuse.
-# Normal chat cadence is unaffected.
+# Budget for the background learn() pass, which costs one extraction LLM
+# call plus embedding writes per turn. A per-user minimum gap plus an
+# hourly ceiling stops scripted abuse while leaving normal chat cadence
+# unaffected.
 _LEARN_MIN_INTERVAL_SECONDS = 10.0
 _LEARN_MAX_PER_HOUR = 60
 
-# Postgres connection pool. Without one, langgraph shares a single connection
-# and all memory operations serialize on it.
+# Postgres connection pool size. Without a pool, langgraph shares one
+# connection and every memory operation waits its turn on it.
 _PG_POOL_MIN = 1
 _PG_POOL_MAX = 10
 _PG_SETUP_LOCK_ID = 4848217165257290356
@@ -183,7 +187,9 @@ async def setup_store() -> BaseStore:
                 # _index_config's dict carries Postgres-specific keys beyond
                 # the shared IndexConfig type.
                 index=cast(Any, index),
-                pool_config=cast(Any, {"min_size": _PG_POOL_MIN, "max_size": _PG_POOL_MAX}),
+                pool_config=cast(
+                    Any, {"min_size": _PG_POOL_MIN, "max_size": _PG_POOL_MAX}
+                ),
             )
             pg_store = await _pg_cm.__aenter__()
             try:
@@ -628,7 +634,7 @@ _PERSONAL_RE = re.compile(
 
 
 def _worth_extracting(text: str) -> bool:
-    """Cheap gate: trivial turns skip the extraction LLM call."""
+    """Inexpensive gate: trivial turns skip the extraction LLM call."""
     stripped = text.strip()
     if len(stripped) < 12:
         return False
