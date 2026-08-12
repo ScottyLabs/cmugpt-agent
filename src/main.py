@@ -34,6 +34,7 @@ from agent.memory import (
     store_is_ready,
     store_status,
 )
+from agent.title import generate_chat_title
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +354,32 @@ async def agent_respond(request: Request) -> JSONResponse:
         content=agent_response.model_dump(),
         status_code=HTTPStatus.OK,
     )
+
+
+@app.post("/agent/title", dependencies=[Depends(_require_shared_secret)])
+async def agent_title(request: Request) -> JSONResponse:
+    """Generate a short chat title from the chat's first user message.
+
+    Returns ``{"title": null}`` rather than an error when generation fails,
+    so the caller can simply keep its placeholder title.
+    """
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Request body must be valid JSON object.",
+        ) from exc
+
+    query = payload.get("query") if isinstance(payload, Mapping) else None
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Field 'query' must be a non-empty string.",
+        )
+
+    title = await generate_chat_title(query)
+    return JSONResponse(content={"title": title}, status_code=HTTPStatus.OK)
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
