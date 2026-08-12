@@ -34,6 +34,12 @@ from agent.memory import (
     store_is_ready,
     store_status,
 )
+from agent.moderation import (
+    ALLOW,
+    blocked_input_response,
+    moderate_text,
+    redacted_output_response,
+)
 from agent.title import generate_chat_title
 
 logger = logging.getLogger(__name__)
@@ -334,6 +340,18 @@ async def agent_respond(request: Request) -> JSONResponse:
 
     user_input, model, message_history, disabled_tools = _parse_request(payload)
 
+    verdict = await moderate_text(user_input.query)
+    if verdict.action != ALLOW:
+        logger.warning(
+            "moderation: blocked input (%s: %s)",
+            verdict.action,
+            ", ".join(verdict.categories),
+        )
+        return JSONResponse(
+            content=blocked_input_response(verdict.action).model_dump(),
+            status_code=HTTPStatus.OK,
+        )
+
     try:
         agent_response = await run_agent(
             user_input=user_input,
@@ -349,6 +367,15 @@ async def agent_respond(request: Request) -> JSONResponse:
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail="Agent execution failed.",
         ) from exc
+
+    out_verdict = await moderate_text(agent_response.response_text)
+    if out_verdict.action != ALLOW:
+        logger.warning(
+            "moderation: redacted reply (%s: %s)",
+            out_verdict.action,
+            ", ".join(out_verdict.categories),
+        )
+        agent_response = redacted_output_response(out_verdict.action)
 
     return JSONResponse(
         content=agent_response.model_dump(),
@@ -413,13 +440,48 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
+            verdict = await moderate_text(user_input.query)
+            if verdict.action != ALLOW:
+                logger.warning(
+                    "moderation: blocked input (%s: %s)",
+                    verdict.action,
+                    ", ".join(verdict.categories),
+                )
+                blocked = blocked_input_response(verdict.action)
+                yield _sse("delta", {"text": blocked.response_text}).encode("utf-8")
+                yield _sse("done", blocked.model_dump()).encode("utf-8")
+                return
+
+            # The done payload is held back until the finished reply passes an
+            # output check: deltas have already streamed, but done is what the
+            # surface persists and re-renders, so redacting it retroactively
+            # scrubs the reply everywhere that outlives the stream.
+            final_payload: dict[str, Any] | None = None
             async for event_name, data in stream_agent_response(
                 user_input=user_input,
                 model=model or "openai/gpt-5.4-mini",
                 message_history=message_history,
                 disabled_tools=disabled_tools,
             ):
+                if event_name == "done":
+                    final_payload = data
+                    continue
                 yield _sse(event_name, data).encode("utf-8")
+
+            if final_payload is not None:
+                out_verdict = await moderate_text(
+                    str(final_payload.get("response_text", ""))
+                )
+                if out_verdict.action != ALLOW:
+                    logger.warning(
+                        "moderation: redacted reply (%s: %s)",
+                        out_verdict.action,
+                        ", ".join(out_verdict.categories),
+                    )
+                    final_payload = redacted_output_response(
+                        out_verdict.action
+                    ).model_dump()
+                yield _sse("done", final_payload).encode("utf-8")
         except Exception:
             # Same policy as the non-streaming endpoint: log the real error,
             # send the client a generic one.

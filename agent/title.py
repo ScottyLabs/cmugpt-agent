@@ -4,12 +4,17 @@ Called once per chat by the surface server, concurrently with the main
 agent turn, so it must stay cheap.
 """
 
+import logging
 import os
 from functools import lru_cache
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+
+from agent.moderation import ALLOW, moderate_text
+
+logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -31,14 +36,13 @@ def _title_model_name() -> str:
 @lru_cache(maxsize=4)
 def _title_model_for_key(model: str, api_key: str) -> ChatOpenAI:
     # Cached so repeated titles reuse one HTTP client (keep-alive) instead of
-    # a new TLS handshake per chat. No completion cap: reasoning models spend
-    # hidden thinking tokens first, and a tight cap starves the actual answer
-    # into an empty string. The prompt keeps the visible output short.
+    # a new TLS handshake per chat.
     return ChatOpenAI(
         model=model,
         api_key=SecretStr(api_key),
         base_url=OPENROUTER_BASE_URL,
         temperature=0.0,
+        extra_body={"reasoning": {"enabled": False}},
     )
 
 
@@ -59,6 +63,12 @@ async def generate_chat_title(first_message: str) -> str | None:
     text = first_message.strip()
     if not api_key or not text:
         return None
+    # A flagged first message must not be echoed into a title. "New chat" is
+    # the surface's default title, so returning it both neutralizes the title
+    # and lets the next allowed message claim it.
+    verdict = await moderate_text(text)
+    if verdict.action != ALLOW:
+        return "New chat"
     model = _title_model_for_key(_title_model_name(), api_key)
     try:
         reply = await model.ainvoke(
@@ -68,5 +78,6 @@ async def generate_chat_title(first_message: str) -> str | None:
             ]
         )
         return _clean(str(reply.content))
-    except Exception:  # noqa: BLE001 - a failed title must never break the turn
+    except Exception as exc:  # noqa: BLE001 - never break the turn over a title
+        logger.warning("title: generation failed (%s)", exc)
         return None
