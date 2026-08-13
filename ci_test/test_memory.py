@@ -1,0 +1,555 @@
+"""Offline tests for persistent user memory (agent/memory.py).
+
+These run with no database and no network: an ``InMemoryStore`` backs the store
+and a deterministic bag-of-words embedding stands in for OpenAI, so semantic
+search, dedup, and forget behave deterministically. The live extraction pass
+(``learn``) calls an LLM and is exercised by the manual E2E scripts instead.
+"""
+
+import asyncio
+import re
+import zlib
+from collections.abc import Sequence
+from math import sqrt
+from typing import Any, cast
+
+from langgraph.store.base import IndexConfig
+from langgraph.store.memory import InMemoryStore
+
+from agent import memory
+
+_EMBED_DIMS = 64
+
+
+def _fake_embed(texts: Sequence[str]) -> list[list[float]]:
+    """Deterministic L2-normalized bag-of-words vectors.
+
+    Texts that share words get high cosine similarity, which is all the memory
+    logic needs to exercise semantic search, dedup, and forget without a model.
+    """
+    vectors: list[list[float]] = []
+    for text in texts:
+        vec = [0.0] * _EMBED_DIMS
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            vec[zlib.crc32(word.encode()) % _EMBED_DIMS] += 1.0
+        norm = sqrt(sum(value * value for value in vec)) or 1.0
+        vectors.append([value / norm for value in vec])
+    return vectors
+
+
+def _indexed_store() -> InMemoryStore:
+    index = cast(
+        IndexConfig,
+        {"dims": _EMBED_DIMS, "embed": _fake_embed, "fields": ["text"]},
+    )
+    return InMemoryStore(index=index)
+
+
+def assert_true(condition: bool, label: str) -> None:
+    if not condition:
+        raise AssertionError(label)
+
+
+def assert_equal(actual: Any, expected: Any, label: str) -> None:
+    if actual != expected:
+        raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+async def _test_recall_roundtrip_and_isolation() -> None:
+    store = _indexed_store()
+    await memory.add_fact(store, "u1", "Is a CS sophomore at CMU")
+    await memory.add_fact(store, "u1", "Vegetarian, avoid meat dining recs")
+
+    block = await memory.recall(store, "u1", "dining recommendations for tonight")
+    assert_true("Vegetarian" in block, "recall surfaces a stored fact")
+    assert_true("Memory about this user" in block, "recall has a header")
+    assert_true(
+        'USER_MEMORY trust="untrusted-data"' in block,
+        "facts are wrapped as untrusted data (injection defense)",
+    )
+
+    # A different user shares nothing.
+    other = await memory.recall(store, "u2", "anything at all")
+    assert_equal(other, "", "recall is isolated per user")
+
+
+async def _test_dedup_skips_duplicates() -> None:
+    store = _indexed_store()
+    first, first_status = await memory.add_fact(store, "u1", "Lives in Morewood")
+    dup, dup_status = await memory.add_fact(
+        store, "u1", "lives in morewood"
+    )  # case variant
+    assert_true(first is not None, "first fact stored")
+    assert_equal(first_status, "saved", "first fact reports saved")
+    assert_equal(dup, first, "duplicate collapses onto the existing fact")
+    assert_true(dup_status in ("duplicate", "updated"), "duplicate is not a failure")
+    facts = await memory.list_facts(store, "u1")
+    assert_equal(len(facts), 1, "only one fact persisted")
+
+    # Re-remembering must read as success to the tool layer, never an error.
+    tools = memory.build_memory_tools(store, "u1")
+    remember = next(t for t in tools if t.name == memory.REMEMBER_TOOL)
+    receipt = await remember.ainvoke({"fact": "Lives in Morewood"})
+    assert_true(
+        "Already in memory" in receipt["message"]
+        or "Updated memory" in receipt["message"],
+        "re-remember confirms instead of failing",
+    )
+
+
+async def _test_explicit_save_promotes_learned_duplicate() -> None:
+    store = _indexed_store()
+    learned_id, _ = await memory.add_fact(
+        store,
+        "u1",
+        "Prefers quiet study spaces",
+        source="extraction",
+    )
+    remembered_id, promote_status = await memory.add_fact(
+        store,
+        "u1",
+        "prefers QUIET study spaces",  # user's restated wording
+        source="tool",
+    )
+    assert_equal(
+        remembered_id,
+        learned_id,
+        "an explicit save promotes rather than duplicates an auto-learned fact",
+    )
+    assert_equal(promote_status, "updated", "promotion is reported as an update")
+    items, total = await memory.list_memory_items(store, "u1")
+    assert_equal(total, 1, "promotion keeps one fact")
+    assert_equal(items[0]["type"], "remembered", "explicit intent is reflected")
+    assert_equal(
+        items[0]["text"],
+        "prefers QUIET study spaces",
+        "an explicit restatement's wording replaces the auto-learned text",
+    )
+
+
+async def _test_forget_removes_best_match() -> None:
+    store = _indexed_store()
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Prefers window seats")
+
+    message = await memory.forget(store, "u1", "allergic to peanuts")
+    assert_true("Forgot" in message, "forget confirms removal")
+    remaining = await memory.list_facts(store, "u1")
+    assert_true(
+        all("peanut" not in fact["text"].lower() for fact in remaining),
+        "the peanut fact is gone",
+    )
+    assert_equal(len(remaining), 1, "the unrelated fact survives")
+
+    # An unrelated query should not delete anything.
+    miss = await memory.forget(store, "u1", "favorite programming language")
+    assert_true("No matching" in miss, "weak match is a no-op")
+
+
+async def _test_forget_tool_scales_from_one_to_everything() -> None:
+    store = _indexed_store()
+    tools = memory.build_memory_tools(store, "u1")
+    forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
+
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Prefers window seats")
+    await memory.add_fact(store, "u1", "Majors in ECE")
+
+    # Several facts in one call without confirmation: nothing is removed and
+    # the would-be deletions are reported for the user to confirm.
+    preview = await forget_tool.ainvoke(
+        {"facts": ["allergic to peanuts", "prefers window seats"]}
+    )
+    assert_true("Nothing was forgotten yet" in preview, "multi-delete asks first")
+    assert_true(
+        "Allergic to peanuts" in preview and "window seats" in preview,
+        "the confirmation preview names what is at stake",
+    )
+    assert_equal(
+        len(await memory.list_facts(store, "u1")), 3, "unconfirmed call deletes nothing"
+    )
+
+    # The same call with confirmed=true removes the named facts, reporting an
+    # entry that matches nothing.
+    multi = await forget_tool.ainvoke(
+        {
+            "facts": ["allergic to peanuts", "prefers window seats", "owns a boat"],
+            "confirmed": True,
+        }
+    )
+    assert_true("Allergic to peanuts" in multi, "first removal is reported")
+    assert_true("window seats" in multi, "second removal is reported")
+    assert_true("no close match" in multi, "the unmatched entry is reported")
+    remaining = await memory.list_facts(store, "u1")
+    assert_equal(len(remaining), 1, "exactly the named facts were removed")
+
+    # Everything: wipes the store and reports the count.
+    receipt = await forget_tool.ainvoke({"everything": True})
+    assert_true("Forgot all 1" in receipt, "clear-all reports the count")
+    assert_equal(await memory.list_facts(store, "u1"), [], "all facts removed")
+
+    # Clearing an empty store and calling with no arguments are both no-ops.
+    empty = await forget_tool.ainvoke({"everything": True})
+    assert_true("No matching" in empty, "clearing nothing is a no-op")
+    noargs = await forget_tool.ainvoke({})
+    assert_true("No matching" in noargs, "no arguments is a no-op")
+
+    # A single fact is just a one-entry list.
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    single = await forget_tool.ainvoke({"facts": ["allergic to peanuts"]})
+    assert_true("Forgot" in single, "single-fact forget still works")
+
+
+async def _test_forget_asks_when_ambiguous() -> None:
+    store = _indexed_store()
+    tools = memory.build_memory_tools(store, "u1")
+    forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
+
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Allergic to shellfish")
+
+    # A query matching both facts equally must delete nothing and surface
+    # the candidates so the model can ask the user to choose.
+    reply = await forget_tool.ainvoke({"facts": ["allergic"]})
+    assert_true(
+        "several remembered facts could match" in reply,
+        "ambiguous request reports the candidates",
+    )
+    assert_true("peanuts" in reply and "shellfish" in reply, "both candidates named")
+    items = await memory.list_facts(store, "u1")
+    assert_equal(len(items), 2, "nothing was deleted on ambiguity")
+
+    # A confirmed exact restatement deletes only the chosen fact.
+    confirmed = await forget_tool.ainvoke({"facts": ["Allergic to peanuts"]})
+    assert_true("Forgot: Allergic to peanuts" in confirmed, "exact quote deletes")
+    remaining = await memory.list_facts(store, "u1")
+    assert_equal(len(remaining), 1, "only the confirmed fact was removed")
+    assert_true("shellfish" in remaining[0]["text"], "the other fact survives")
+
+
+async def _test_memory_tools_write_to_namespace() -> None:
+    store = _indexed_store()
+    tools = memory.build_memory_tools(store, "u1")
+    assert_equal(
+        {tool.name for tool in tools},
+        {memory.REMEMBER_TOOL, memory.FORGET_TOOL},
+        "both memory tools are built",
+    )
+
+    remember = next(tool for tool in tools if tool.name == memory.REMEMBER_TOOL)
+    result = await remember.ainvoke({"fact": "Majors in ECE"})
+    assert_true(isinstance(result, dict), "remember returns a structured receipt")
+    assert_true("Saved to memory" in result["message"], "remember confirms")
+    assert_true(bool(result["memory_id"]), "remember receipt includes item id")
+    assert_equal(result["fact"], "Majors in ECE", "remember receipt includes fact")
+
+    facts = await memory.list_facts(store, "u1")
+    assert_true(any("ECE" in fact["text"] for fact in facts), "fact was written")
+
+    # The user id is captured in the closure, so u2 never sees it.
+    assert_equal(await memory.list_facts(store, "u2"), [], "tools are user-scoped")
+
+
+async def _test_user_id_wildcard_cannot_cross_read() -> None:
+    """A LIKE-wildcard user_id must not read another user's memory."""
+    store = _indexed_store()
+    await memory.add_fact(store, "alice", "Alice is allergic to shellfish")
+    await memory.add_fact(store, "bob", "Bob lives in Morewood")
+
+    # '%' / '_' are SQL LIKE wildcards. The allowlist must reject them so they
+    # never reach the store's (unescaped) LIKE prefix match.
+    assert_true(not memory.is_valid_user_id("%"), "'%' rejected")
+    assert_true(not memory.is_valid_user_id("_"), "'_' rejected")
+    assert_true(not memory.is_valid_user_id("a.b"), "namespace separator rejected")
+    assert_true(not memory.is_valid_user_id(""), "empty rejected")
+    assert_true(not memory.is_valid_user_id("x" * 129), "over-long rejected")
+    assert_true(memory.is_valid_user_id("alice-123"), "normal id accepted")
+
+    # The whole read surface must yield nothing for a wildcard id, not a dump.
+    assert_equal(await memory.recall(store, "%", "anything"), "", "recall blocked")
+    assert_equal(await memory.list_facts(store, "%"), [], "list blocked")
+    forget_msg = await memory.forget(store, "%", "shellfish")
+    assert_true("No matching" in forget_msg, "forget blocked")
+
+    # A wildcard-id write is a no-op (never pollutes a real namespace).
+    blocked_key, blocked_status = await memory.add_fact(store, "%", "injected")
+    assert_true(blocked_key is None, "write blocked")
+    assert_equal(blocked_status, "skipped", "blocked write reports skipped")
+    assert_equal(memory.build_memory_tools(store, "%"), [], "no tools for bad id")
+
+
+async def _test_recall_without_index_degrades() -> None:
+    store = InMemoryStore()  # no embeddings - recency fallback
+    await memory.add_fact(store, "u1", "Plays club soccer on weekends")
+    block = await memory.recall(store, "u1", "hobbies")
+    assert_true("club soccer" in block, "recall works without an index")
+
+
+async def _test_clear_memory() -> None:
+    store = _indexed_store()
+    await memory.add_fact(store, "u1", "Uses a standing desk")
+    await store.aput(
+        ("u1", "episodes"),
+        "legacy-turn",
+        {"text": "User asked: Where is the nearest gym?", "ts": "2025-01-01"},
+    )
+    removed = await memory.clear_memory(store, "u1")
+    assert_equal(removed, 2, "clear removes facts and legacy raw-chat snippets")
+    assert_equal(await memory.list_facts(store, "u1"), [], "nothing remains")
+
+
+async def _test_management_search_and_typed_delete() -> None:
+    store = InMemoryStore()
+    await memory.add_fact(
+        store, "u1", "Prefers quiet study spaces", source="extraction"
+    )
+    await memory.add_fact(
+        store, "u1", "Remember that quiet rooms help me focus", source="tool"
+    )
+    await store.aput(
+        ("u1", "episodes"),
+        "legacy-turn",
+        {
+            "text": "User asked: Help me find a quiet place this afternoon",
+            "ts": "2025-01-01",
+        },
+    )
+
+    matches, total = await memory.list_memory_items(
+        store, "u1", query="quiet", limit=20
+    )
+    assert_equal(total, 2, "literal management search spans both fact origins")
+    assert_equal(
+        {item["type"] for item in matches},
+        {"learned", "remembered"},
+        "management results distinguish learned and explicitly saved facts",
+    )
+    assert_true(
+        all("User asked:" not in item["text"] for item in matches),
+        "raw chat snippets are never user-visible",
+    )
+
+    learned = next(item for item in matches if item["type"] == "learned")
+    deleted = await memory.delete_memory_item(
+        store, "u1", "learned", str(learned["id"])
+    )
+    assert_true(deleted, "typed delete removes the requested learned fact")
+    learned_items, learned_total = await memory.list_memory_items(
+        store, "u1", memory_type="learned"
+    )
+    assert_equal(learned_items, [], "deleted learned fact is no longer visible")
+    assert_equal(learned_total, 0, "learned total updates after deletion")
+    legacy = await store.aget(("u1", "episodes"), "legacy-turn")
+    assert_true(legacy is not None, "individual fact deletion leaves cleanup scoped")
+
+
+class _FakeExtractorReply:
+    content = '["Asked about the Gates Center location"]'
+
+
+class _FakeExtractorModel:
+    async def ainvoke(self, _messages: Any) -> _FakeExtractorReply:
+        return _FakeExtractorReply()
+
+
+async def _test_learn_never_persists_raw_turns() -> None:
+    store = InMemoryStore()
+    user = "no-raw-chat-user"
+    memory._learn_history.pop(user, None)
+    # The real extractor is a live LLM call, which this offline suite must
+    # never make (CI has no model credentials). The stub returns a canned
+    # extraction so the rest of learn's write path runs for real.
+    real_extractor = memory._extractor_model
+    memory._extractor_model = cast(Any, _FakeExtractorModel)
+    try:
+        await memory.learn(
+            store,
+            user,
+            "Where is Gates Center?",
+            "Gates Center is on the east side of campus.",
+        )
+    finally:
+        memory._extractor_model = real_extractor
+    episodes = await store.asearch((user, "episodes"), limit=10)
+    assert_equal(episodes, [], "background learning does not store transcript snippets")
+    facts = await store.asearch((user, "facts"), limit=10)
+    assert_true(
+        any("Gates Center" in (item.value.get("text") or "") for item in facts),
+        "extracted facts are stored (stubbed extraction reached the write path)",
+    )
+
+
+async def _test_clear_memory_beyond_one_page() -> None:
+    store = InMemoryStore()
+    for i in range(1001):
+        await store.aput(
+            ("u1", "episodes"),
+            str(i),
+            {"text": f"Past conversation {i}", "ts": f"2026-01-01T00:00:{i:04d}Z"},
+        )
+    removed = await memory.clear_memory(store, "u1")
+    assert_equal(removed, 1001, "clear deletes every page of episodes")
+    remaining = await store.asearch(("u1", "episodes"), limit=2000)
+    assert_equal(remaining, [], "clear leaves no episode beyond the old 1000 limit")
+
+
+async def _test_forget_keyword_fallback_without_index() -> None:
+    store = InMemoryStore()  # no embeddings
+    await memory.add_fact(store, "u1", "Allergic to peanuts")
+    await memory.add_fact(store, "u1", "Prefers window seats")
+
+    miss = await memory.forget(store, "u1", "favorite color")
+    assert_true("No matching" in miss, "no shared words -> no-op, not arbitrary")
+    assert_equal(len(await memory.list_facts(store, "u1")), 2, "nothing deleted")
+
+    hit = await memory.forget(store, "u1", "the peanuts thing")
+    assert_true("peanuts" in hit, "keyword overlap picks the right fact")
+    remaining = [f["text"] for f in await memory.list_facts(store, "u1")]
+    assert_equal(remaining, ["Prefers window seats"], "only the match removed")
+
+
+async def _test_growth_caps_prune_oldest() -> None:
+    original_facts = memory._MAX_FACTS
+    original_every = memory._CAP_CHECK_EVERY
+    memory._MAX_FACTS = 3
+    memory._CAP_CHECK_EVERY = 1  # cap checks are amortized; force every write
+    try:
+        store = _indexed_store()
+        for i in range(5):
+            await memory.add_fact(store, "u1", f"Distinct standalone fact number {i}")
+        facts = [f["text"] for f in await memory.list_facts(store, "u1")]
+        assert_equal(len(facts), 3, "facts capped")
+        assert_true(
+            all(f"number {i}" in " ".join(facts) for i in (2, 3, 4)),
+            "newest facts survive, oldest evicted",
+        )
+    finally:
+        memory._MAX_FACTS = original_facts
+        memory._CAP_CHECK_EVERY = original_every
+
+
+async def _test_explicit_facts_evicted_last() -> None:
+    """At the cap, auto-extracted facts are dropped before explicit saves,
+    even when the explicit saves are older."""
+    original = memory._MAX_FACTS
+    original_every = memory._CAP_CHECK_EVERY
+    memory._MAX_FACTS = 3
+    memory._CAP_CHECK_EVERY = 1
+    try:
+        store = _indexed_store()
+        await memory.add_fact(store, "u1", "Shellfish allergy warning", source="tool")
+        await memory.add_fact(store, "u1", "Morning class preference", source="tool")
+        await memory.add_fact(
+            store, "u1", "Note about dining halls", source="extraction"
+        )
+        await memory.add_fact(
+            store, "u1", "Note about campus shuttles", source="extraction"
+        )
+        await memory.add_fact(
+            store, "u1", "Note about library hours", source="extraction"
+        )
+
+        remaining = {f["text"] for f in await memory.list_facts(store, "u1")}
+        assert_equal(len(remaining), 3, "cap enforced")
+        assert_true(
+            "Shellfish allergy warning" in remaining
+            and "Morning class preference" in remaining,
+            "older explicit saves outlive newer extracted facts",
+        )
+        assert_true(
+            "Note about library hours" in remaining,
+            "newest extracted fact survives",
+        )
+    finally:
+        memory._MAX_FACTS = original
+        memory._CAP_CHECK_EVERY = original_every
+
+
+def _test_learn_rate_limit() -> None:
+    """The learn budget blocks rapid-fire runs and enforces the hourly cap."""
+    user = "rate-limit-user"
+    memory._learn_history.pop(user, None)
+    try:
+        assert_true(memory._learn_allowed(user, now=0.0), "first run allowed")
+        assert_true(
+            not memory._learn_allowed(user, now=1.0),
+            "run inside the minimum interval is blocked",
+        )
+        assert_true(
+            memory._learn_allowed(user, now=30.0),
+            "run after the minimum interval is allowed",
+        )
+
+        allowed = 2  # the two successful runs above
+        now = 30.0
+        for _ in range(200):
+            now += memory._LEARN_MIN_INTERVAL_SECONDS
+            if memory._learn_allowed(user, now=now):
+                allowed += 1
+        assert_equal(allowed, memory._LEARN_MAX_PER_HOUR, "hourly ceiling enforced")
+    finally:
+        memory._learn_history.pop(user, None)
+
+
+def _test_prompt_memory_section() -> None:
+    from agent.prompts import build_system_prompt
+
+    tools = memory.build_memory_tools(InMemoryStore(), "u1")
+    with_memory = build_system_prompt(tools)
+    assert_true(
+        "Persistent user memory" in with_memory,
+        "prompt teaches memory when tools present",
+    )
+    assert_true("`remember`" in with_memory, "prompt names the remember tool")
+    assert_true(
+        "Never store transient details" in with_memory,
+        "prompt bounds what remember may store",
+    )
+
+    without_memory = build_system_prompt([])
+    assert_true(
+        "Persistent user memory" not in without_memory,
+        "anonymous turns get no memory section",
+    )
+
+
+def _test_parse_facts_is_tolerant() -> None:
+    assert_equal(memory._parse_facts('["a", "b"]'), ["a", "b"], "plain array")
+    assert_equal(
+        memory._parse_facts('Here you go:\n["x"]\nthanks'),
+        ["x"],
+        "array embedded in prose",
+    )
+    assert_equal(memory._parse_facts("not json at all"), [], "non-json -> empty")
+    assert_equal(memory._parse_facts("[]"), [], "empty array -> empty")
+
+
+async def _run_async() -> None:
+    await _test_recall_roundtrip_and_isolation()
+    await _test_dedup_skips_duplicates()
+    await _test_explicit_save_promotes_learned_duplicate()
+    await _test_forget_removes_best_match()
+    await _test_forget_tool_scales_from_one_to_everything()
+    await _test_forget_asks_when_ambiguous()
+    await _test_memory_tools_write_to_namespace()
+    await _test_user_id_wildcard_cannot_cross_read()
+    await _test_recall_without_index_degrades()
+    await _test_clear_memory()
+    await _test_management_search_and_typed_delete()
+    await _test_learn_never_persists_raw_turns()
+    await _test_clear_memory_beyond_one_page()
+    await _test_forget_keyword_fallback_without_index()
+    await _test_growth_caps_prune_oldest()
+    await _test_explicit_facts_evicted_last()
+
+
+def run() -> None:
+    asyncio.run(_run_async())
+    _test_parse_facts_is_tolerant()
+    _test_prompt_memory_section()
+    _test_learn_rate_limit()
+
+
+if __name__ == "__main__":
+    run()
+    print("Memory tests passed.")

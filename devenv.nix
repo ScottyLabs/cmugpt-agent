@@ -6,7 +6,16 @@
     enable = true;
     project.name = "cmugpt-agent";
     secrets.enable = true;
-    postgres.enable = false;
+    # Local Postgres + pgvector for durable user memory. devenv creates the
+    # database and exports DATABASE_URL into the shell. The agent runs
+    # CREATE EXTENSION vector on setup.
+    postgres = {
+      enable = true;
+      extensions = e: [
+        e.pg_uuidv7
+        e.pgvector
+      ];
+    };
     python.enable = true;
 
     kennel.services.agent = {

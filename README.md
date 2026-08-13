@@ -10,6 +10,35 @@ This project makes use of several excellent tools from [Astral](https://github.c
 uv sync
 ```
 
+Create a `.env` file with `OPENROUTER_API_KEY`, `MCP_SERVER_URL`,
+`OPENAI_API_KEY`, `AGENT_SHARED_SECRET`, and `DATABASE_URL`. For durable user
+memory, create a PostgreSQL database with pgvector and point `DATABASE_URL` at
+it (for example `postgresql:///cmugpt_agent?host=/tmp` for a local unix-socket
+server):
+
+```sh
+createdb cmugpt_agent
+psql -d cmugpt_agent -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+`OPENROUTER_API_KEY` powers chat and memory extraction. `OPENAI_API_KEY` is a
+real OpenAI key used for `text-embedding-3-large` semantic search. The
+`AGENT_SHARED_SECRET` is a random application-to-application bearer token shared
+only with the Surface server; generate one with `openssl rand -hex 32` and never
+put it in browser-visible configuration.
+
+The embedding model uses a pgvector `halfvec(3072)` HNSW index. Startup
+verifies that an existing `store_vectors` table matches this shape and refuses
+to start against a database initialized for a different embedding model; in
+that case rebuild the `store_vectors` and `vector_migrations` tables and
+re-index any memory you need to retain. A fresh database needs no preparation
+beyond `CREATE EXTENSION vector`.
+
+Long-term memory stores only durable facts: facts distilled from chats and facts
+the user explicitly asks CMUGPT to remember. Raw user/assistant turns are not
+stored or recalled as memory. The clear-memory endpoint also purges the legacy
+episode namespace so data written by older deployments can still be removed.
+
 2. Install the pre-commit hooks using
 
 ```sh
@@ -37,6 +66,16 @@ You can set the `PORT` environment variable to change the listening port (defaul
 PORT=8080 uv run python src/main.py
 ```
 
+Verify that memory is actually durable:
+
+```sh
+curl -s http://localhost:5000/api/health
+```
+
+The response must report `memory.backend` as `postgres`, `memory.ready` as
+`true`, and `memory.semantic_search` as `true`. An `in-memory` backend is only a
+local-development fallback and resets on process restart.
+
 ## Deployment (Kennel)
 
 Production runs on Kennel via devenv and secretspec. Pushes to **Codeberg** `main` trigger deploys (GitHub mirror pushes do not).
@@ -57,10 +96,20 @@ Set production secrets (requires `cmugpt-agent-admins` group and `bao login -met
 
 ```sh
 secretspec set -P prod OPENROUTER_API_KEY
+secretspec set -P prod OPENAI_API_KEY
 secretspec set -P prod MCP_SERVER_URL
 secretspec set -P prod AGENT_SHARED_SECRET
 secretspec check -P prod
 ```
+
+`DATABASE_URL` is not an OpenBao secret: Kennel injects it into the process
+environment from its platform-managed Postgres, so it is deliberately not
+declared in `secretspec.toml`. The database in `devenv.nix` fills the same
+role for local development.
+
+Production must set `AGENT_ENV=production` (the `Procfile` already does). The
+agent refuses to start in production if `DATABASE_URL` or
+`AGENT_SHARED_SECRET` is missing from the environment.
 
 ## Guidelines
 

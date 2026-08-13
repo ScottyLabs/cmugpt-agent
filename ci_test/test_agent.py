@@ -13,8 +13,10 @@ from typing import Any
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
 
+from agent import graph as graph_module
 from agent.mcp_tools import disabled_group_labels, filter_tools, tool_group
 from agent.prompts import build_system_prompt
 from agent.schema import ActionType, AgentResponse, Thought, UserInput
@@ -71,7 +73,9 @@ async def fake_run_agent(
 def test_health(client: TestClient) -> None:
     response = client.get("/api/health")
     assert_equal(response.status_code, HTTPStatus.OK, "health status")
-    assert_equal(response.json(), {"status": "ok"}, "health payload")
+    payload = response.json()
+    assert_equal(payload["status"], "ok", "health status field")
+    assert_true("backend" in payload["memory"], "health reports memory backend")
 
 
 def test_agent_respond_accepts_supported_payload_shapes(
@@ -111,6 +115,57 @@ def test_agent_respond_rejects_invalid_payload(client: TestClient) -> None:
     assert_equal(payload["error"], payload["detail"], "legacy error envelope")
 
 
+def test_agent_respond_enforces_input_caps(client: TestClient) -> None:
+    oversized_query = client.post("/agent/respond", json={"query": "x" * 8001})
+    assert_equal(
+        oversized_query.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "oversized query rejected",
+    )
+
+    oversized_user = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "user_id": "u" * 129},
+    )
+    assert_equal(
+        oversized_user.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "oversized user_id rejected",
+    )
+
+    long_history = [{"role": "user", "content": f"msg {i}"} for i in range(45)]
+    trimmed = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "message_history": long_history},
+    )
+    assert_equal(trimmed.status_code, HTTPStatus.OK, "long history accepted")
+    assert_true(
+        "history=40" in trimmed.json()["response_text"],
+        "history trimmed to the cap",
+    )
+
+
+def test_memory_endpoints_reject_wildcard_user_id(client: TestClient) -> None:
+    # A LIKE-wildcard user_id must be rejected at the boundary, not reach the
+    # store (where it would match every user's namespace).
+    body_wildcard = client.post(
+        "/agent/respond",
+        json={"query": "Hi", "user_id": "%"},
+    )
+    assert_equal(
+        body_wildcard.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "wildcard user_id in body rejected",
+    )
+
+    path_wildcard = client.get("/memory/%25")  # %25 decodes to '%'
+    assert_equal(
+        path_wildcard.status_code,
+        HTTPStatus.BAD_REQUEST,
+        "wildcard user_id in path rejected",
+    )
+
+
 def test_agent_respond_enforces_shared_secret(client: TestClient) -> None:
     with temporary_env("AGENT_SHARED_SECRET", "ci-secret"):
         missing_auth = client.post("/agent/respond", json={"query": "Hi"})
@@ -132,6 +187,142 @@ def test_agent_respond_enforces_shared_secret(client: TestClient) -> None:
     )
     assert_equal(wrong_auth.status_code, HTTPStatus.UNAUTHORIZED, "wrong auth status")
     assert_equal(authorized.status_code, HTTPStatus.OK, "authorized status")
+
+
+def test_production_requires_database_and_shared_secret() -> None:
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", None),
+        temporary_env("AGENT_SHARED_SECRET", None),
+    ):
+        try:
+            app_module._validate_runtime_configuration()
+        except RuntimeError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError(
+                "production starts without durable authenticated memory"
+            )
+    assert_true("DATABASE_URL" in message, "missing database is reported")
+    assert_true("AGENT_SHARED_SECRET" in message, "missing shared secret is reported")
+
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", "postgresql://example.invalid/cmugpt"),
+        temporary_env("AGENT_SHARED_SECRET", "too-short"),
+    ):
+        try:
+            app_module._validate_runtime_configuration()
+        except RuntimeError as exc:
+            assert_true("at least 32" in str(exc), "short secret is rejected")
+        else:
+            raise AssertionError("production accepts a weak shared secret")
+
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", "postgresql://example.invalid/cmugpt"),
+        temporary_env("AGENT_SHARED_SECRET", "s" * 32),
+    ):
+        app_module._validate_runtime_configuration()
+
+
+def test_latency_planner_keeps_generic_turns_tool_free() -> None:
+    assert_true(
+        not graph_module._needs_data_tools("Reply with exactly one short sentence."),
+        "generic turn skips MCP tools",
+    )
+    assert_true(
+        not graph_module._needs_memory_tools("Reply with exactly one short sentence."),
+        "generic turn skips memory tools",
+    )
+    assert_true(
+        not graph_module._needs_memory_recall("Reply with exactly one short sentence."),
+        "generic turn skips memory recall",
+    )
+
+
+def test_latency_planner_preserves_memory_tools() -> None:
+    assert_true(
+        graph_module._needs_memory_tools("Remember that I am vegetarian."),
+        "explicit remember keeps memory tools",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("Where should I eat on campus?"),
+        "personalized recommendation recalls memory",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("What animal do I like?"),
+        "personal fact question recalls memory",
+    )
+    assert_true(
+        graph_module._needs_memory_recall("What did I tell you earlier?"),
+        "question about an earlier user statement recalls memory",
+    )
+
+
+def test_data_tool_gate_scans_recent_history() -> None:
+    history = [
+        {"role": "user", "content": "Where is Gates?"},
+        {"role": "assistant", "content": "Gates is on Forbes."},
+    ]
+    assert_true(
+        graph_module._needs_data_tools("what about Wean Hall?", history),
+        "follow-up turn keeps data tools via history",
+    )
+    assert_true(
+        not graph_module._needs_data_tools("what about Wean Hall?", None),
+        "same text without history still skips tools",
+    )
+    small_talk = [{"role": "user", "content": "hello"}]
+    assert_true(
+        not graph_module._needs_data_tools("thanks!", small_talk),
+        "non-data threads still skip tools",
+    )
+
+
+def test_force_latch_counts_memory_tool_rounds() -> None:
+    from langchain_core.messages import (
+        AIMessage,
+        AnyMessage,
+        HumanMessage,
+        ToolMessage,
+    )
+
+    before: list[AnyMessage] = [
+        HumanMessage(content="Remember that I love the Underground.")
+    ]
+    assert_true(
+        not graph_module._had_tool_round(before),
+        "no tool round before the first pass",
+    )
+    after: list[AnyMessage] = [
+        *before,
+        AIMessage(content="", tool_calls=[]),
+        ToolMessage(content="Saved to memory: ...", tool_call_id="call_remember"),
+    ]
+    assert_true(
+        graph_module._had_tool_round(after),
+        "memory-only round releases the force latch",
+    )
+
+
+def test_every_llm_turn_uses_the_canonical_system_prompt() -> None:
+    state = graph_module._initial_state(
+        UserInput(query="Explain recursion briefly.", user_id="ci-user"),
+        None,
+        [],
+    )
+    first = state["messages"][0]
+    assert_true(isinstance(first, SystemMessage), "first message is system policy")
+    assert_equal(
+        first.content,
+        build_system_prompt([]),
+        "no-tool turns use the canonical prompt",
+    )
+    assert_true(
+        "Immutable rules (highest priority)" in str(first.content),
+        "canonical security rules are present",
+    )
 
 
 class StubTool(BaseTool):
@@ -278,8 +469,8 @@ def test_agent_respond_rejects_malformed_disabled_tools(client: TestClient) -> N
 
 
 def run() -> None:
-    # Importing the app loads .env, so a developer with AGENT_SHARED_SECRET set
-    # locally would otherwise get 401s on the unauthenticated cases below.
+    # Keep smoke tests independent of a developer's local .env. The dedicated
+    # shared-secret test below sets and verifies authentication explicitly.
     with temporary_env("AGENT_SHARED_SECRET", None):
         run_tests()
 
@@ -294,7 +485,15 @@ def run_tests() -> None:
         test_health(client)
         test_agent_respond_accepts_supported_payload_shapes(client)
         test_agent_respond_rejects_invalid_payload(client)
+        test_agent_respond_enforces_input_caps(client)
+        test_memory_endpoints_reject_wildcard_user_id(client)
         test_agent_respond_enforces_shared_secret(client)
+        test_production_requires_database_and_shared_secret()
+        test_latency_planner_keeps_generic_turns_tool_free()
+        test_latency_planner_preserves_memory_tools()
+        test_data_tool_gate_scans_recent_history()
+        test_force_latch_counts_memory_tool_rounds()
+        test_every_llm_turn_uses_the_canonical_system_prompt()
         test_agent_respond_forwards_disabled_tools(client)
         test_agent_respond_rejects_malformed_disabled_tools(client)
 
