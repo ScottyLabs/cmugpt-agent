@@ -31,14 +31,11 @@ class ShowMapArgs(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # The runtime-built enum is opaque to ty, which sees a variable rather
-    # than a type. Pydantic and langchain resolve it and emit a plain schema
-    # enum of the codes.
-    destination: BuildingCode = Field(  # ty: ignore[invalid-type-form]
+    destination: BuildingCode = Field(
         ...,
         description="Building the user asked about; the map centers on it.",
     )
-    origin: BuildingCode | None = Field(  # ty: ignore[invalid-type-form]
+    origin: BuildingCode | None = Field(
         default=None,
         description=(
             "Starting point of a walking route. Set ONLY when the user stated "
