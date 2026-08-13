@@ -101,11 +101,7 @@ _PG_POOL_MIN = 1
 _PG_POOL_MAX = 10
 _PG_SETUP_LOCK_ID = 4848217165257290356
 
-_PG_SCHEMA = os.getenv("AGENT_MEMORY_SCHEMA", "agent_memory")
-if not re.fullmatch(r"[a-z_][a-z0-9_]*", _PG_SCHEMA):
-    raise RuntimeError(
-        f"AGENT_MEMORY_SCHEMA must be a lowercase identifier (got {_PG_SCHEMA!r})."
-    )
+_PG_SCHEMA = "agent_memory"
 
 _EMBED_DIMS = 3072
 _EMBED_MODEL = "text-embedding-3-large"
@@ -300,22 +296,15 @@ def _conn_string_with_search_path(db_url: str) -> str:
 
 async def _setup_postgres_store(store: Any, db_url: str) -> None:
     """Serialize LangGraph's first-run migrations across worker processes."""
-    from psycopg import AsyncConnection, sql
+    from psycopg import AsyncConnection
 
     # Dedicated autocommit connection for the advisory lock: borrowing from
     # the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
         try:
-            # Not string concatenation: psycopg's sql.Identifier is the
-            # driver's injection-safe way to place an identifier in DDL
-            # (identifiers cannot be bound as query parameters), and
-            # _PG_SCHEMA is regex-validated at import. The semgrep rule
-            # only pattern-matches execute+format.
-            await conn.execute(  # nosemgrep
-                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                    sql.Identifier(_PG_SCHEMA)
-                )
-            )
+            # Static DDL on purpose (_PG_SCHEMA is this same literal): with
+            # no composition the statement is trivially injection-free.
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS agent_memory")
         except Exception as exc:
             raise RuntimeError(
                 f"Could not create memory schema {_PG_SCHEMA!r}. The "
