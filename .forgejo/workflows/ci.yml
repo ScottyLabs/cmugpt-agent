@@ -13,7 +13,7 @@ jobs:
 
   test-agent:
     needs: check
-    runs-on: docker
+    runs-on: native
     env:
       SECRETSPEC_PROFILE: ci
       SECRETSPEC_PROVIDER: env
@@ -22,7 +22,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v7
-      - uses: https://codeberg.org/ScottyLabs/kennel/.forgejo/actions/prepare@main
+      - uses: https://git.cmu.dev/ScottyLabs/kennel/.forgejo/actions/prepare@main
 
       - name: Test Agent
         # devenv exports DATABASE_URL on shell entry but CI runs no postgres.
