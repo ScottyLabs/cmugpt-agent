@@ -13,11 +13,11 @@ Graph shape: ``START -> recall -> agent``. From ``agent`` either
 background memory-learn task before emitting ``done``, so a client disconnect
 right after the final event cannot cancel it.
 
-Streaming is done with LangGraph's custom stream channel: nodes emit typed
-events through the injected `writer`, and the public entrypoints forward them as
+Streaming uses LangGraph's custom stream channel. Nodes emit typed events
+through the injected `writer` and the public entrypoints forward them as
 ``(event_name, data)`` tuples matching the existing SSE contract
-(``status`` / ``map`` / ``delta`` / ``done`` / ``error``). When the graph is run
-non-streaming via ``ainvoke`` the writes are simply dropped.
+(``status`` / ``map`` / ``delta`` / ``done`` / ``error``). A non-streaming
+``ainvoke`` run simply drops the writes.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -50,13 +50,23 @@ from pydantic import SecretStr
 
 from .cmu_maps import SHOW_MAP_TOOL_NAME, _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
+    REFUSAL_TEXT,
+    StreamScrubber,
+    apply_output_guard,
     apply_tool_transparency_guard,
     asks_about_tools,
+    canned_refusal_response,
     compute_thought,
+    is_flagrant_injection,
     should_require_tool,
 )
 from .map_tool import build_show_map_tool
-from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
+from .mcp_tools import (
+    filter_tools,
+    load_mcp_tools,
+    normalize_disabled_groups,
+    select_tools_for_query,
+)
 from .memory import (
     FORGET_TOOL,
     REMEMBER_TOOL,
@@ -68,6 +78,7 @@ from .memory import (
 )
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
+from .token_limits import record_usage
 
 load_dotenv()
 
@@ -78,11 +89,34 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 StreamEvent = tuple[str, dict[str, Any]]
 
 
+# Safety limits rather than tuning parameters. The values are set high
+# enough that ordinary conversations never reach them, so they engage only
+# on anomalous input.
+
+# History is billed on every model pass. Sixty messages is thirty exchanges.
+_HISTORY_MAX_MESSAGES = 60
+_HISTORY_MAX_MESSAGE_CHARS = 12_000
+
+# User turns scanned for tool-group narrowing. Local regex only, no tokens.
+_HISTORY_HINT_TURNS = 20
+
+# Tool results are resent on every subsequent pass. Twelve thousand
+# characters accommodates every current CMU tool result, including the 9k
+# full dining list, so the cap engages only if a tool begins returning
+# substantially more. The marker prevents the model from presenting a
+# truncated list as complete.
+_TOOL_RESULT_MAX_CHARS = 12_000
+_TOOL_RESULT_TRUNCATION_MARKER = (
+    "\n[Result truncated. More entries exist beyond this point.]"
+)
+
+
 class AgentState(TypedDict):
     """Shared state threaded through the graph."""
 
     messages: Annotated[list[AnyMessage], add_messages]
     query: str
+    # Memory namespace owner and owner of the daily token budget for this run.
     user_id: str | None
     memory_block: str
     tool_invocations: Annotated[list[dict[str, Any]], operator.add]
@@ -93,6 +127,11 @@ class AgentState(TypedDict):
     # Tool groups the user switched off in the Surface. Their tools are
     # already unbound. Postprocess reads this to keep the map embed off too.
     disabled_tools: list[str]
+    # Completed tool rounds. Drives the unbound later passes.
+    tool_rounds: Annotated[int, operator.add]
+    # Persists across passes so that a subsequent clean pass cannot clear a
+    # detection.
+    leak_detected: Annotated[bool, operator.or_]
 
 
 # Background memory-extraction tasks run detached from the response. Python
@@ -154,6 +193,9 @@ def _make_chat_model_for_key(model: str, api_key: str) -> ChatOpenAI:
         model=model,
         api_key=SecretStr(api_key),
         base_url=OPENROUTER_BASE_URL,
+        # Report usage on the final stream chunk so the budget records
+        # measured consumption rather than estimates.
+        stream_usage=True,
     )
 
 
@@ -255,6 +297,44 @@ def _had_tool_round(messages: list[AnyMessage]) -> bool:
     return any(isinstance(message, ToolMessage) for message in messages)
 
 
+def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
+    """Charge one model pass to the user's daily budget and log it.
+
+    Falls back to a characters/4 estimate so the budget remains enforceable
+    when the stream carries no usage metadata. The log line is what allows
+    the caps and thresholds to be tuned from production data rather than
+    estimated.
+    """
+    usage = getattr(gathered, "usage_metadata", None) or {}
+    estimated = not usage.get("total_tokens")
+    if estimated:
+        input_chars = sum(len(_message_text(m)) for m in state["messages"])
+        total = (input_chars + len(_message_text(gathered))) // 4
+    else:
+        total = int(usage["total_tokens"])
+    logger.info(
+        "pass_usage user=%s round=%s input=%s output=%s total=%s estimated=%s",
+        (state.get("user_id") or "anonymous")[:8],
+        state.get("tool_rounds", 0),
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        total,
+        estimated,
+    )
+    try:
+        record_usage(state.get("user_id"), total)
+    except Exception:
+        # An in-flight answer must not be interrupted, but a silent failure
+        # here would disable the budget, so it is logged explicitly.
+        logger.exception("token budget recording failed")
+
+
+def _truncate_tool_result(result: str) -> str:
+    if len(result) <= _TOOL_RESULT_MAX_CHARS:
+        return result
+    return result[:_TOOL_RESULT_MAX_CHARS] + _TOOL_RESULT_TRUNCATION_MARKER
+
+
 def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
@@ -294,6 +374,16 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
         # off there is no map to contradict, so map queries stream normally.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
+        # Live deltas cannot be retracted, so they trail the scrubber's
+        # holdback. Buffered passes are instead scanned in postprocess.
+        scrubber: StreamScrubber | None = None
+        if not suppress_stream:
+            prompt_text = (
+                _message_text(state["messages"][0]) if state["messages"] else ""
+            )
+            scrubber = StreamScrubber(prompt_text)
+        withheld_notice_sent = False
+
         gathered: AIMessageChunk | None = None
         saw_tool_call = False
         streamed_any = False
@@ -304,12 +394,32 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
             if chunk.tool_call_chunks:
                 saw_tool_call = True
             text = _message_text(chunk)
-            if text and not saw_tool_call and not suppress_stream:
-                writer({"event": "delta", "data": {"text": text}})
-                streamed_any = True
+            if text and not saw_tool_call and scrubber is not None:
+                safe = scrubber.push(text)
+                if safe:
+                    writer({"event": "delta", "data": {"text": safe}})
+                    streamed_any = True
+                elif scrubber.tripped and streamed_any and not withheld_notice_sent:
+                    writer(
+                        {"event": "delta", "data": {"text": "\n\n[Response withheld.]"}}
+                    )
+                    withheld_notice_sent = True
 
         if gathered is None:
             gathered = AIMessageChunk(content="")
+
+        # Flush the held tail on every exit path. Otherwise the final
+        # characters of a preamble preceding a tool call would be lost.
+        if scrubber is not None:
+            tail = scrubber.flush()
+            if tail:
+                writer({"event": "delta", "data": {"text": tail}})
+                streamed_any = True
+            if scrubber.tripped and streamed_any and not withheld_notice_sent:
+                writer({"event": "delta", "data": {"text": "\n\n[Response withheld.]"}})
+        leak_detected = scrubber.tripped if scrubber is not None else False
+
+        _record_pass_usage(state, gathered)
 
         final_message = AIMessage(
             content=gathered.content,
@@ -318,12 +428,13 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
 
         if gathered.tool_calls:
             writer({"event": "status", "data": {"text": "Checking CMU tools..."}})
-            return {"messages": [final_message]}
+            return {"messages": [final_message], "leak_detected": leak_detected}
 
         return {
             "messages": [final_message],
             "response_text": _message_text(gathered),
             "streamed": streamed_any,
+            "leak_detected": leak_detected,
         }
 
     return agent_node
@@ -388,6 +499,7 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
             memory_fact: str | None = None
             is_memory_tool = name in internal_memory_names
             memory_op_failed = False
+            failed = False
             if tool is None:
                 result = f"Tool '{name}' is not available."
                 failed = True
@@ -435,8 +547,12 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
                             failed = raw.status == "error"
                         else:
                             result = raw if isinstance(raw, str) else str(raw)
-                            failed = False
-                except Exception as exc:  # noqa: BLE001 - surface as tool data
+                except ToolException as exc:
+                    # Server-authored errors are data the model requires, for
+                    # example "no building with that id".
+                    result = f"Tool '{name}' returned an error: {exc}"
+                    failed = True
+                except Exception:  # noqa: BLE001 - surface as tool data
                     if is_memory_tool:
                         # Raw exception text can expose database connection
                         # details. The full error is logged and a generic
@@ -445,7 +561,11 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
                         result = "The memory operation failed; nothing was changed."
                         memory_op_failed = True
                     else:
-                        result = f"Tool '{name}' failed: {exc}"
+                        # Transport errors embed internal URLs and hosts, so
+                        # the model receives a generic string and the detail
+                        # is confined to server logs.
+                        logger.exception("tool %s failed", name)
+                        result = f"Tool '{name}' failed."
                         failed = True
 
             if is_memory_tool:
@@ -476,7 +596,9 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
 
             # The invocation record keeps the raw result, which the map guard
             # reads. Only the model's copy is replaced on failure.
-            new_invocations.append({"name": name, "arguments": args, "result": result})
+            new_invocations.append(
+                {"name": name, "arguments": args, "result": result, "ok": not failed}
+            )
             model_result = (
                 _tool_failure_notice(name, maps_enabled) if failed else result
             )
@@ -490,11 +612,13 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
             ):
                 new_services.append(name)
 
-            # Wrap tool output so the model treats it as untrusted DATA, not as
-            # instructions. Defense against prompt-injection from MCP content.
+            # Wrapped so the model treats tool output as untrusted data
+            # rather than instructions. The invocation record above retains
+            # the full result for map inference. Only the model's copy is
+            # capped.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{model_result}\n"
+                f"{_truncate_tool_result(model_result)}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -504,6 +628,7 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
             "messages": new_messages,
             "tool_invocations": new_invocations,
             "services_used": new_services,
+            "tool_rounds": 1,
         }
 
     return tools_node
@@ -537,6 +662,20 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
+
+    # The output guard runs after the guards above so that any text they
+    # injected is also scanned. A detection during streaming forces the
+    # refusal outright, and a refusal must never carry an attached map.
+    prompt_text = _message_text(state["messages"][0]) if state.get("messages") else ""
+    if state.get("leak_detected"):
+        parsed.response_text = REFUSAL_TEXT
+        parsed.cmu_maps = CmuMaps()
+    else:
+        cleaned, replaced = apply_output_guard(parsed.response_text or "", prompt_text)
+        parsed.response_text = cleaned
+        if replaced:
+            parsed.cmu_maps = CmuMaps()
+
     parsed.thought = compute_thought(services, invocations, parsed.response_text)
     parsed.action = ActionType.RETRIEVE if services else ActionType.RESPOND
 
@@ -632,10 +771,18 @@ def build_graph(
     return graph.compile(store=store)
 
 
+def _cap_history_text(content: str) -> str:
+    if len(content) <= _HISTORY_MAX_MESSAGE_CHARS:
+        return content
+    # Retain the head, since answers front-load the substance that
+    # follow-ups reference.
+    return content[:_HISTORY_MAX_MESSAGE_CHARS] + "\n[earlier turn truncated]"
+
+
 def _sanitize_history(
     message_history: list[dict[str, str]] | None,
 ) -> list[AnyMessage]:
-    """Convert caller history to LangChain messages, dropping non user/assistant.
+    """Convert caller history to sanitized LangChain messages.
 
     We own the system prompt. Smuggled `system`/`tool` turns are an injection
     vector, so only `user` and `assistant` turns are carried over.
@@ -643,16 +790,34 @@ def _sanitize_history(
     if not message_history:
         return []
     out: list[AnyMessage] = []
-    for turn in message_history:
+    for turn in message_history[-_HISTORY_MAX_MESSAGES:]:
         role = turn.get("role")
         content = turn.get("content")
         if not isinstance(content, str):
             continue
         if role == "user":
-            out.append(HumanMessage(content=content))
+            out.append(HumanMessage(content=_cap_history_text(content)))
         elif role == "assistant":
-            out.append(AIMessage(content=content))
+            out.append(AIMessage(content=_cap_history_text(content)))
     return out
+
+
+def _history_hint_texts(
+    message_history: list[dict[str, str]] | None,
+) -> list[str]:
+    """User turns supplied to tool-group narrowing.
+
+    Restricted to user turns because assistant turns reproduce tool data
+    verbatim and would therefore match every group.
+    """
+    if not message_history:
+        return []
+    texts = [
+        turn["content"]
+        for turn in message_history
+        if turn.get("role") == "user" and isinstance(turn.get("content"), str)
+    ]
+    return texts[-_HISTORY_HINT_TURNS:]
 
 
 def _initial_state(
@@ -676,6 +841,8 @@ def _initial_state(
         streamed=False,
         response_payload={},
         disabled_tools=list(disabled_tools or []),
+        tool_rounds=0,
+        leak_detected=False,
     )
 
 
@@ -688,8 +855,9 @@ async def _prepare_tools_and_store(
 
     Ordinary chat skips MCP discovery, schema binding, and store setup for
     latency. Every turn still gets the canonical security policy. Disabled
-    tool groups are filtered out first. Memory tools are appended after, so a
-    toggle can never remove them.
+    tool groups are filtered out first, then the survivors are narrowed to
+    the query so a keyword match cannot re-bind a disabled group. Memory
+    tools are appended after, so a toggle can never remove them.
     """
     query = user_input.query
     user_id = user_input.user_id
@@ -702,7 +870,14 @@ async def _prepare_tools_and_store(
 
     tools: list[BaseTool] = []
     if needs_data_tools:
-        tools.extend(filter_tools(await load_mcp_tools(), disabled_tools))
+        # Narrowing runs after the disabled-group filter so that a keyword
+        # match can never re-bind a disabled group.
+        mcp_tools = filter_tools(await load_mcp_tools(), disabled_tools)
+        tools.extend(
+            select_tools_for_query(
+                mcp_tools, query, _history_hint_texts(message_history)
+            )
+        )
         if maps_enabled:
             # Appended after filtering so a disabled maps group never sees
             # it. Local tool, so it costs no MCP discovery. Turns that skip
@@ -722,7 +897,7 @@ async def _prepare_tools_and_store(
 
 async def run_agent(
     user_input: UserInput,
-    model: str = "openai/gpt-5.4-mini",
+    model: str = "openai/gpt-5.6-luna",
     message_history: list[dict[str, str]] | None = None,
     disabled_tools: list[str] | None = None,
 ) -> AgentResponse:
@@ -736,6 +911,11 @@ async def run_agent(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
         )
+
+    # Flagrant jailbreak phrasing receives the canned refusal before any tool
+    # loading or model call, so the turn consumes no tokens.
+    if is_flagrant_injection(user_input.query):
+        return canned_refusal_response()
 
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
         user_input, disabled_tools, message_history
@@ -767,7 +947,7 @@ async def stream_agent_response(
     message_history: list[dict[str, str]] | None,
     disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    """Streaming entry point: yields ('delta', ...) ... ('done', ...) events."""
+    """Streaming entry point. Yields ('delta', ...) through ('done', ...)."""
     if not _api_key():
         fb = _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
@@ -775,6 +955,13 @@ async def stream_agent_response(
         )
         yield ("delta", {"text": fb.response_text})
         yield ("done", fb.model_dump())
+        return
+
+    # The same zero-token fast path as run_agent, expressed as stream events.
+    if is_flagrant_injection(user_input.query):
+        refusal = canned_refusal_response()
+        yield ("delta", {"text": refusal.response_text})
+        yield ("done", refusal.model_dump())
         return
 
     tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(

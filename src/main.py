@@ -41,8 +41,14 @@ from agent.moderation import (
     redacted_output_response,
 )
 from agent.title import generate_chat_title
+from agent.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
 
 logger = logging.getLogger(__name__)
+
+# Request bodies are rejected by header before parsing. Uvicorn imposes
+# no default body limit, so oversized input is both a cost and an abuse
+# vector.
+_MAX_BODY_BYTES = 256 * 1024
 
 # Upper bounds on request input. Query and history text is sent to the
 # model, where longer input costs more tokens, and user_id becomes each
@@ -50,6 +56,7 @@ logger = logging.getLogger(__name__)
 _MAX_QUERY_CHARS = 8_000
 _MAX_USER_ID_CHARS = 128
 _MAX_HISTORY_MESSAGES = 40
+_MAX_HISTORY_ITEMS = 200
 _MAX_HISTORY_MESSAGE_CHARS = 8_000
 _PRODUCTION_ENV_NAMES = ("AGENT_ENV", "APP_ENV", "ENVIRONMENT", "SECRETSPEC_PROFILE")
 _PRODUCTION_ENV_VALUES = {"prod", "production"}
@@ -125,10 +132,9 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# Optional shared-secret auth. When AGENT_SHARED_SECRET is set, every request
-# to /agent/respond* must send `Authorization: Bearer <secret>`. When unset,
-# auth is skipped (local dev). The HTTPBearer scheme has auto_error=False so
-# we can return our own structured error envelope.
+# Optional shared-secret authentication. When AGENT_SHARED_SECRET is set,
+# /agent/respond* requires a matching bearer token. auto_error=False
+# preserves this module's own error envelope.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -175,7 +181,7 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     query = candidate.get("query") or candidate.get("message") or candidate.get("input")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("A non-empty 'query' field is required.")
-    if len(query) > _MAX_QUERY_CHARS:
+    if len(query.strip()) > _MAX_QUERY_CHARS:
         raise ValueError(f"'query' must be at most {_MAX_QUERY_CHARS} characters.")
 
     context = candidate.get("context")
@@ -265,6 +271,11 @@ def _parse_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="'message_history' must be a list if provided.",
         )
+    if isinstance(message_history, list) and len(message_history) > _MAX_HISTORY_ITEMS:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"'message_history' must have at most {_MAX_HISTORY_ITEMS} items.",
+        )
     if isinstance(message_history, list):
         # Accept user/assistant/system at the boundary. The agent strips
         # `system` defensively. Surface clients keep `system` rows in their
@@ -308,6 +319,32 @@ _READY_TTL_SECONDS = 5.0
 _ready_cache: tuple[float, bool] | None = None
 
 
+def _reject_oversized_body(request: Request) -> None:
+    """Reject oversized bodies by header before request.json() parses them."""
+    length = request.headers.get("content-length")
+    if length is not None and length.isdigit() and int(length) > _MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Request body must be at most {_MAX_BODY_BYTES} bytes.",
+        )
+
+
+def _enforce_daily_token_limit(user_input: UserInput) -> None:
+    """Reject with 429 once the user's daily budget is exhausted.
+
+    Checked before any model call, because the streaming endpoint has
+    already returned 200 by the time its generator runs and therefore
+    cannot signal this condition itself.
+    """
+    try:
+        ensure_within_daily_limit(user_input.user_id)
+    except DailyTokenLimitExceeded as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+
+
 @app.get("/api/health")
 async def health() -> JSONResponse:
     # The memory block reports which backend this deployment is using and
@@ -330,6 +367,7 @@ async def health() -> JSONResponse:
 
 @app.post("/agent/respond", dependencies=[Depends(_require_shared_secret)])
 async def agent_respond(request: Request) -> JSONResponse:
+    _reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -339,6 +377,7 @@ async def agent_respond(request: Request) -> JSONResponse:
         ) from exc
 
     user_input, model, message_history, disabled_tools = _parse_request(payload)
+    _enforce_daily_token_limit(user_input)
 
     verdict = await moderate_text(user_input.query)
     if verdict.action != ALLOW:
@@ -355,7 +394,7 @@ async def agent_respond(request: Request) -> JSONResponse:
     try:
         agent_response = await run_agent(
             user_input=user_input,
-            model=model or "openai/gpt-5.4-mini",
+            model=model or "openai/gpt-5.6-luna",
             message_history=message_history,
             disabled_tools=disabled_tools,
         )
@@ -428,6 +467,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         event: done   data: <full AgentResponse JSON>
         event: error  data: {"error": "...", "detail": "..."}
     """
+    _reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -437,6 +477,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         ) from exc
 
     user_input, model, message_history, disabled_tools = _parse_request(payload)
+    _enforce_daily_token_limit(user_input)
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
@@ -459,7 +500,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
             final_payload: dict[str, Any] | None = None
             async for event_name, data in stream_agent_response(
                 user_input=user_input,
-                model=model or "openai/gpt-5.4-mini",
+                model=model or "openai/gpt-5.6-luna",
                 message_history=message_history,
                 disabled_tools=disabled_tools,
             ):

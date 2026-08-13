@@ -1,22 +1,44 @@
 """Deterministic, framework-agnostic guards and metadata computation.
 
-These helpers post-process the model's plain-Markdown answer. They contain the
-real business logic that used to live inside the hand-rolled completion loop:
+The system prompt can only request compliance. These helpers enforce it,
+making leaks and false disclosures impossible regardless of what the model
+generates. None of them invoke an LLM, so they add no input tokens and
+remain directly unit-testable.
 
-* tool-transparency: keep user-facing disclosure consistent with the
-  authoritative `services_used` list computed by the graph (never the model's
-  self-report).
-* metadata: compute `thought` (confidence + reasoning) deterministically from
-  the calibration rubric, since the model no longer emits a JSON envelope.
-
-None of these functions touch the LLM or any framework; they operate on plain
-data so they stay easy to unit-test.
+This module provides tool-transparency repair, deterministic `thought`
+computation, secret and prompt-leak scrubbing of outgoing text, a streaming
+holdback scrubber, and a zero-token fast path for flagrant injection
+attempts.
 """
 
+import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
-from .schema import AgentResponse, Thought
+from .schema import ActionType, AgentResponse, Thought
+
+# Strings the prompt explicitly instructs the model to echo. The leak
+# detector must exempt them, since otherwise a legitimate crisis response or
+# refusal would itself be classified as a leak and discarded. prompts.py
+# interpolates these same constants, so the allowlist cannot drift from the
+# prompt.
+IDENTITY_PHRASE = "CMUGPT, an assistant for CMU campus information"
+CRISIS_RESOURCES_LINE = (
+    "CMU CaPS (412-268-2922), the 988 Suicide & Crisis Lifeline, or CMU "
+    "Police (412-268-2323)"
+)
+GENERAL_INFO_QUALIFIER = "based on general info - please verify"
+REFUSAL_TEXT = (
+    "I can't help with that, but I'd be glad to help you find a building, "
+    "dining option, or course on campus."
+)
+ECHO_SAFE_SNIPPETS = (
+    IDENTITY_PHRASE,
+    CRISIS_RESOURCES_LINE,
+    GENERAL_INFO_QUALIFIER,
+    REFUSAL_TEXT,
+)
 
 TOOL_TRANSPARENCY_RE = re.compile(
     r"\b(mcp|mcps|tool|tools|external service|external services|look(?:ed)? up)\b",
@@ -52,8 +74,8 @@ NEGATIVE_TOOL_CLAIM_PATTERNS = [
     ),
 ]
 
-# Heuristic markers that suggest the assistant declined or redirected. Used only
-# to calibrate confidence; correctness of refusals is enforced elsewhere.
+# Heuristic markers indicating the assistant declined or redirected. Used
+# only to calibrate confidence. Refusal correctness is enforced elsewhere.
 REFUSAL_MARKERS = (
     "can't help",
     "cannot help",
@@ -141,6 +163,231 @@ def apply_tool_transparency_guard(
     return parsed
 
 
+_REDACTION = "[redacted]"
+
+# Environment variables whose live values must never reach the user. The
+# model does not observe most of them, but tool errors and misconfigured
+# servers can propagate them into output.
+_SECRET_ENV_NAMES = (
+    "OPENROUTER_API_KEY",
+    "AGENT_SHARED_SECRET",
+    "MCP_SERVER_URL",
+    "DATABASE_URL",
+)
+
+# Values overlapping these public URLs are exempt from redaction, which
+# would otherwise corrupt every legitimate map link.
+_PUBLIC_URL_PREFIXES = ("https://maps.scottylabs.org",)
+
+# Unset or very short values are skipped, since substituting them would
+# corrupt ordinary text.
+_MIN_SECRET_CHARS = 8
+
+_OPENROUTER_KEY_RE = re.compile(r"sk-or(?:-v1)?-[A-Za-z0-9]{20,}")
+
+# Only high-entropy bearer tokens are redacted, so code-help answers
+# containing placeholder tokens are preserved.
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{30,})")
+
+# A leak is defined as an 80-character normalized window of the answer
+# occurring verbatim in the prompt. The stride reduces the number of scans at
+# the cost of a marginally higher effective detection threshold.
+_LEAK_WINDOW = 80
+_LEAK_SCAN_STEP = 8
+
+
+def _normalize_leak_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower())
+
+
+def _secret_values() -> list[str]:
+    values: list[str] = []
+    for name in _SECRET_ENV_NAMES:
+        value = (os.getenv(name) or "").strip()
+        if len(value) < _MIN_SECRET_CHARS:
+            continue
+        if any(value in public for public in _PUBLIC_URL_PREFIXES):
+            continue
+        values.append(value)
+        # Transport errors frequently expose only the host, so the netloc of
+        # URL-shaped secrets is redacted as well.
+        if "://" in value:
+            netloc = urlparse(value).netloc
+            if len(netloc) >= _MIN_SECRET_CHARS and not any(
+                netloc in public for public in _PUBLIC_URL_PREFIXES
+            ):
+                values.append(netloc)
+    return values
+
+
+def build_leak_corpus(system_prompt: str) -> str:
+    """Normalized prompt text with the echo-safe snippets removed.
+
+    Snippets are replaced by a NUL byte so that no scan window can match
+    across the seam left by a removal.
+    """
+    corpus = _normalize_leak_text(system_prompt)
+    for snippet in ECHO_SAFE_SNIPPETS:
+        corpus = corpus.replace(_normalize_leak_text(snippet), "\x00")
+    return corpus
+
+
+def _matches_leak_corpus(text: str, corpus: str) -> bool:
+    if not corpus:
+        return False
+    normalized = _normalize_leak_text(text)
+    if len(normalized) < _LEAK_WINDOW:
+        return False
+    for start in range(0, len(normalized) - _LEAK_WINDOW + 1, _LEAK_SCAN_STEP):
+        if normalized[start : start + _LEAK_WINDOW] in corpus:
+            return True
+    return False
+
+
+def _redact_bearer_match(match: re.Match[str]) -> str:
+    token = match.group(1)
+    has_lower = any(c.islower() for c in token)
+    has_digit = any(c.isdigit() for c in token)
+    # Genuine tokens combine lowercase letters and digits. Placeholders such
+    # as YOUR_TOKEN_HERE do not.
+    if has_lower and has_digit:
+        return match.group(0).replace(token, _REDACTION)
+    return match.group(0)
+
+
+def redact_secrets(text: str) -> str:
+    cleaned = text
+    for value in _secret_values():
+        cleaned = cleaned.replace(value, _REDACTION)
+    cleaned = _OPENROUTER_KEY_RE.sub(_REDACTION, cleaned)
+    return _BEARER_TOKEN_RE.sub(_redact_bearer_match, cleaned)
+
+
+# Reasoning models (MiniMax, DeepSeek, GLM) may delimit their chain of thought with
+# a tag such as `<think>` or `<mm:think>`. OpenRouter routes that content to a
+# separate field, but the closing delimiter intermittently bleeds into the
+# answer channel. Any such tag is stripped from outgoing text so it never
+# reaches the user. The optional `<provider>:` prefix covers vendor variants.
+_REASONING_TAG_RE = re.compile(
+    r"</?(?:[a-z]{1,12}:)?think(?:ing)?\s*>",
+    re.IGNORECASE,
+)
+
+
+def strip_reasoning_tags(text: str) -> str:
+    return _REASONING_TAG_RE.sub("", text)
+
+
+def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
+    """Scrub outgoing text. Returns (cleaned text, whether fully replaced).
+
+    Runs last in postprocess so that text injected by earlier guards is also
+    scanned. A prompt leak replaces the entire answer, whereas incidental
+    secrets are redacted in place.
+    """
+    if not text:
+        return text, False
+    if _matches_leak_corpus(text, build_leak_corpus(system_prompt)):
+        return REFUSAL_TEXT, True
+    return strip_reasoning_tags(redact_secrets(text)), False
+
+
+class StreamScrubber:
+    """Rolling holdback that catches leaks before they are transmitted.
+
+    An emitted delta cannot be retracted, so the stream trails the model by a
+    fixed tail. Any leak detectable within the scan window therefore remains
+    unemitted at the moment of detection. Once tripped, nothing further is
+    emitted and postprocess supplies the refusal in the authoritative `done`
+    payload.
+    """
+
+    # Exceeds the leak window so that a detected window is always still held.
+    HOLDBACK_CHARS = 160
+
+    def __init__(self, system_prompt: str) -> None:
+        self._corpus = build_leak_corpus(system_prompt) if system_prompt else ""
+        self._secrets = _secret_values()
+        self._text = ""
+        # Count of cleaned (tag-stripped) characters already emitted. Tracking
+        # in cleaned space lets a reasoning tag split across chunks still be
+        # removed, since the whole safe region is re-stripped each push.
+        self._emitted_clean = 0
+        self.tripped = False
+
+    def _dangerous(self) -> bool:
+        if any(value in self._text for value in self._secrets):
+            return True
+        if _OPENROUTER_KEY_RE.search(self._text):
+            return True
+        return _matches_leak_corpus(self._text, self._corpus)
+
+    def _emit_up_to(self, safe_raw: str) -> str:
+        # HOLDBACK_CHARS greatly exceeds any tag length, so safe_raw never ends
+        # mid-tag and its cleaned form only grows as a stable prefix.
+        clean = strip_reasoning_tags(safe_raw)
+        out = clean[self._emitted_clean :]
+        self._emitted_clean = len(clean)
+        return out
+
+    def push(self, chunk: str) -> str:
+        """Append model text and return the portion now safe to emit."""
+        if self.tripped:
+            return ""
+        self._text += chunk
+        if self._dangerous():
+            self.tripped = True
+            return ""
+        safe_len = max(0, len(self._text) - self.HOLDBACK_CHARS)
+        return self._emit_up_to(self._text[:safe_len])
+
+    def flush(self) -> str:
+        """Return the held tail after a final scan. Empty once tripped."""
+        if self.tripped:
+            return ""
+        if self._dangerous():
+            self.tripped = True
+            return ""
+        return self._emit_up_to(self._text)
+
+
+# High-precision signatures only. A false positive refuses a legitimate user
+# with no opportunity for model recourse, so ambiguous phrasing is left to
+# the prompt rules. The lookahead exempts shell-help questions about
+# terminal prompts.
+INJECTION_FAST_PATH_RE = re.compile(
+    r"(?i)("
+    r"ignore\s+all\s+(?:previous|prior|above)\s+instructions"
+    r"|disregard\s+(?:all\s+)?(?:your|previous|prior)\s+instructions"
+    r"|you\s+are\s+now\s+dan\b"
+    r"|developer\s+mode\s+enabled"
+    r"|(?:reveal|repeat|output|print|show)\s+(?:me\s+)?(?:your|the)\s+"
+    r"(?:system|hidden)\s+prompt"
+    r"(?![^.?!\n]*\b(?:zsh|bash|shell|terminal|ps1|prompt_command)\b)"
+    r")"
+)
+
+
+def is_flagrant_injection(query: str) -> bool:
+    """True only for unambiguous jailbreak phrasing warranting a canned refusal.
+
+    This is a cost optimization rather than the defense itself. The prompt
+    rules and the output guard cover everything these signatures miss.
+    """
+    return bool(INJECTION_FAST_PATH_RE.search(query or ""))
+
+
+def canned_refusal_response() -> AgentResponse:
+    """Refusal without any model call, calibrated like a computed refusal."""
+    return AgentResponse(
+        thought=Thought(
+            reasoning="Declined or redirected the request.", confidence=0.3
+        ),
+        action=ActionType.RESPOND,
+        response_text=REFUSAL_TEXT,
+    )
+
+
 def _looks_like_refusal(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in REFUSAL_MARKERS)
@@ -151,10 +398,10 @@ def compute_thought(
     tool_invocations: list[dict[str, Any]],
     response_text: str,
 ) -> Thought:
-    """Deterministically derive confidence + reasoning from the answer context.
+    """Derive confidence and reasoning deterministically from answer context.
 
-    Replaces the model's former self-reported `thought`. Follows the calibration
-    rubric from the system prompt:
+    Replaces the model's former self-reported `thought`, following the
+    calibration rubric stated in the system prompt:
 
     * 0.9+  : an authoritative tool returned data this turn
     * 0.6-0.8: partial tool data, or solid training knowledge
@@ -170,8 +417,12 @@ def compute_thought(
             confidence=0.3,
         )
 
+    # A failed call still produces a non-empty failure string, so the `ok`
+    # flag is what distinguishes returned data from an error.
     tools_returned_data = any(
-        isinstance(inv.get("result"), str) and inv["result"].strip()
+        inv.get("ok", True)
+        and isinstance(inv.get("result"), str)
+        and inv["result"].strip()
         for inv in tool_invocations
     )
     if services_used and tools_returned_data:
