@@ -328,6 +328,8 @@ def _maps_from_show_map(call: dict[str, Any]) -> CmuMaps | None:
 def _infer_cmu_maps(
     messages: list[dict[str, Any]],
     tool_invocations: list[dict[str, Any]],
+    *,
+    model_decides: bool = False,
 ) -> CmuMaps:
     # The model's explicit decision takes precedence over everything below,
     # including the intent gate, since it judges phrasing and history that no
@@ -336,6 +338,13 @@ def _infer_cmu_maps(
         decided = _maps_from_show_map(call)
         if decided:
             return decided
+
+    # When the show-map tool was bound this turn, not calling it IS the
+    # model's decision, so the pattern fallbacks below must not outvote it
+    # (they would map a bare "hi" to the HI building). They remain only for
+    # turns where the model never had the tool.
+    if model_decides:
+        return CmuMaps()
 
     query = latest_user_text(messages)
     if not query:
@@ -497,8 +506,10 @@ def _apply_cmu_maps_guard(
     parsed: AgentResponse,
     messages: list[dict[str, Any]],
     tool_invocations: list[dict[str, Any]],
+    *,
+    model_decides: bool = False,
 ) -> AgentResponse:
-    inferred = _infer_cmu_maps(messages, tool_invocations)
+    inferred = _infer_cmu_maps(messages, tool_invocations, model_decides=model_decides)
     if inferred.url:
         parsed.cmu_maps = inferred
         # The validated map is authoritative. If the text still claims the

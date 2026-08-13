@@ -101,6 +101,12 @@ _PG_POOL_MIN = 1
 _PG_POOL_MAX = 10
 _PG_SETUP_LOCK_ID = 4848217165257290356
 
+_PG_SCHEMA = os.getenv("AGENT_MEMORY_SCHEMA", "agent_memory")
+if not re.fullmatch(r"[a-z_][a-z0-9_]*", _PG_SCHEMA):
+    raise RuntimeError(
+        f"AGENT_MEMORY_SCHEMA must be a lowercase identifier (got {_PG_SCHEMA!r})."
+    )
+
 _EMBED_DIMS = 3072
 _EMBED_MODEL = "text-embedding-3-large"
 _PG_VECTOR_TYPE = "halfvec"
@@ -180,7 +186,7 @@ async def setup_store() -> BaseStore:
                     "'psycopg[binary]' to the project dependencies."
                 ) from exc
             _pg_cm = AsyncPostgresStore.from_conn_string(
-                db_url,
+                _conn_string_with_search_path(db_url),
                 # _index_config's dict carries Postgres-specific keys beyond
                 # the shared IndexConfig type.
                 index=cast(Any, index),
@@ -279,13 +285,39 @@ async def _verify_postgres_vector_dimensions(store: Any) -> None:
         )
 
 
+def _conn_string_with_search_path(db_url: str) -> str:
+    """Append search_path options to a URL-style conn string.
+
+    An explicit `options=` already present in the URL is the operator's
+    choice and wins.
+    """
+    if "options=" in db_url:
+        return db_url
+    options = f"options=-csearch_path%3D{_PG_SCHEMA},public"
+    separator = "&" if "?" in db_url else "?"
+    return f"{db_url}{separator}{options}"
+
+
 async def _setup_postgres_store(store: Any, db_url: str) -> None:
     """Serialize LangGraph's first-run migrations across worker processes."""
-    from psycopg import AsyncConnection
+    from psycopg import AsyncConnection, sql
 
     # Dedicated autocommit connection for the advisory lock: borrowing from
     # the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
+        try:
+            await conn.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(_PG_SCHEMA)
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not create memory schema {_PG_SCHEMA!r}. The "
+                "database role needs either CREATE on the database or an "
+                "existing schema it can write to (ask ops for: GRANT "
+                f"USAGE, CREATE ON SCHEMA {_PG_SCHEMA} TO <role>)."
+            ) from exc
         # Poll pg_try_advisory_lock instead of blocking in pg_advisory_lock:
         # LangGraph runs CREATE INDEX CONCURRENTLY, which waits on every older
         # open transaction, so a worker parked inside the blocking SELECT
