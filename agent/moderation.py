@@ -76,7 +76,7 @@ def _exceeded(scores: dict, thresholds: dict[str, float]) -> list[str]:
     flagged = []
     for category, threshold in thresholds.items():
         score = scores.get(category)
-        if isinstance(score, int | float) and score >= threshold:
+        if isinstance(score, int | float) and float(score) >= threshold:
             flagged.append(category)
     return flagged
 

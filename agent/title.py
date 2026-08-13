@@ -48,7 +48,7 @@ def _title_model_for_key(model: str, api_key: str) -> ChatOpenAI:
 
 def _clean(raw: str) -> str | None:
     """Normalize model output into a display-safe title, or None if empty."""
-    title = raw.strip().split("\n")[0].strip().strip("\"'“”")
+    title = raw.strip().split("\n")[0].strip().strip("\"'" + "\u201c\u201d")
     title = title.rstrip(".!?,;:")
     if not title:
         return None
