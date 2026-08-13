@@ -360,7 +360,7 @@ async def _test_learn_never_persists_raw_turns() -> None:
     # never make (CI has no model credentials). The stub returns a canned
     # extraction so the rest of learn's write path runs for real.
     real_extractor = memory._extractor_model
-    memory._extractor_model = _FakeExtractorModel  # type: ignore[assignment]
+    memory._extractor_model = cast(Any, _FakeExtractorModel)
     try:
         await memory.learn(
             store,

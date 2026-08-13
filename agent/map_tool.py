@@ -71,7 +71,10 @@ def build_show_map_tool() -> StructuredTool:
             "Attach the interactive campus map to your answer: one building, "
             "or a walking route when `origin` is also set. Call it whenever "
             "the user asks where something is, how to get somewhere, or what "
-            "is near a place. It only displays the map - it returns no data, "
+            "is near a place, including a terse 'X to Y' message when X and "
+            "Y are campus buildings or building codes - that is a route "
+            "request. When a campus location is involved, prefer "
+            "showing the map. It only displays the map - it returns no data, "
             "so still call data tools for hours, menus, rooms, or courses."
         ),
         args_schema=ShowMapArgs,
