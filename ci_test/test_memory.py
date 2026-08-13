@@ -343,18 +343,40 @@ async def _test_management_search_and_typed_delete() -> None:
     assert_true(legacy is not None, "individual fact deletion leaves cleanup scoped")
 
 
+class _FakeExtractorReply:
+    content = '["Asked about the Gates Center location"]'
+
+
+class _FakeExtractorModel:
+    async def ainvoke(self, _messages: Any) -> _FakeExtractorReply:
+        return _FakeExtractorReply()
+
+
 async def _test_learn_never_persists_raw_turns() -> None:
     store = InMemoryStore()
     user = "no-raw-chat-user"
     memory._learn_history.pop(user, None)
-    await memory.learn(
-        store,
-        user,
-        "Where is Gates Center?",
-        "Gates Center is on the east side of campus.",
-    )
+    # The real extractor is a live LLM call, which this offline suite must
+    # never make (CI has no model credentials). The stub returns a canned
+    # extraction so the rest of learn's write path runs for real.
+    real_extractor = memory._extractor_model
+    memory._extractor_model = _FakeExtractorModel  # type: ignore[assignment]
+    try:
+        await memory.learn(
+            store,
+            user,
+            "Where is Gates Center?",
+            "Gates Center is on the east side of campus.",
+        )
+    finally:
+        memory._extractor_model = real_extractor
     episodes = await store.asearch((user, "episodes"), limit=10)
     assert_equal(episodes, [], "background learning does not store transcript snippets")
+    facts = await store.asearch((user, "facts"), limit=10)
+    assert_true(
+        any("Gates Center" in (item.value.get("text") or "") for item in facts),
+        "extracted facts are stored (stubbed extraction reached the write path)",
+    )
 
 
 async def _test_clear_memory_beyond_one_page() -> None:
@@ -480,8 +502,8 @@ def _test_prompt_memory_section() -> None:
     )
     assert_true("`remember`" in with_memory, "prompt names the remember tool")
     assert_true(
-        "only when the user explicitly asks" in with_memory,
-        "explicit saves remain distinct from background-learned facts",
+        "Never store transient details" in with_memory,
+        "prompt bounds what remember may store",
     )
 
     without_memory = build_system_prompt([])
