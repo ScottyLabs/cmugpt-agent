@@ -306,7 +306,12 @@ async def _setup_postgres_store(store: Any, db_url: str) -> None:
     # the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
         try:
-            await conn.execute(
+            # Not string concatenation: psycopg's sql.Identifier is the
+            # driver's injection-safe way to place an identifier in DDL
+            # (identifiers cannot be bound as query parameters), and
+            # _PG_SCHEMA is regex-validated at import. The semgrep rule
+            # only pattern-matches execute+format.
+            await conn.execute(  # nosemgrep
                 sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
                     sql.Identifier(_PG_SCHEMA)
                 )
