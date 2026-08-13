@@ -658,9 +658,11 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     )
 
     # CMUMaps switched off means no map embed either, not just no map tools.
-    # The guard below is what attaches the map to the answer.
+    # The guard below is what attaches the map to the answer. maps_show_map
+    # is always bound when maps are enabled, so the model has already made
+    # the map decision and the guard must not second-guess it with patterns.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
-        parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
+        parsed = _apply_cmu_maps_guard(parsed, msgs, invocations, model_decides=True)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
 
     # The output guard runs after the guards above so that any text they
@@ -878,12 +880,14 @@ async def _prepare_tools_and_store(
                 mcp_tools, query, _history_hint_texts(message_history)
             )
         )
-        if maps_enabled:
-            # Appended after filtering so a disabled maps group never sees
-            # it. Local tool, so it costs no MCP discovery. Turns that skip
-            # data tools skip it too: postprocess validates any proposal and
-            # falls back to query inference when the tool was never bound.
-            tools.append(build_show_map_tool())
+    if maps_enabled:
+        # Deliberately outside the data-tools gate: the map is the model's
+        # decision, so the tool must always be in its hands, keyword gating
+        # here would decide navigation before the model can. Local tool, so
+        # it costs no MCP discovery; the price is the catalog section on
+        # every turn. Postprocess still validates every proposal and query
+        # inference remains only a fallback.
+        tools.append(build_show_map_tool())
 
     store: BaseStore | None = None
     if recall_enabled or needs_memory_tools:
