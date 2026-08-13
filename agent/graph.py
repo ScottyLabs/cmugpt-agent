@@ -2,8 +2,10 @@
 
 A single compiled `StateGraph` is the one source of truth for both the
 non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
-endpoints. The model emits plain Markdown. Deterministic nodes compute
-`cmu_maps`, `services_used`, and `thought` into graph state.
+endpoints. The model emits plain Markdown and proposes the campus map by
+calling the local maps_show_map tool. Deterministic nodes validate that
+proposal, fall back to query inference, and compute cmu_maps, services_used,
+and thought into graph state.
 
 Graph shape: ``START -> recall -> agent``. From ``agent`` either
 ``-> tools -> agent`` (when the model requested tool calls) or
@@ -46,13 +48,14 @@ from langgraph.store.base import BaseStore
 from langgraph.types import StreamWriter
 from pydantic import SecretStr
 
-from .cmu_maps import _apply_cmu_maps_guard, query_has_map_intent
+from .cmu_maps import SHOW_MAP_TOOL_NAME, _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
     apply_tool_transparency_guard,
     asks_about_tools,
     compute_thought,
     should_require_tool,
 )
+from .map_tool import build_show_map_tool
 from .mcp_tools import filter_tools, load_mcp_tools, normalize_disabled_groups
 from .memory import (
     FORGET_TOOL,
@@ -87,8 +90,8 @@ class AgentState(TypedDict):
     response_text: str
     streamed: bool
     response_payload: dict[str, Any]
-    # Tool groups the user switched off. Their tools are already unbound.
-    # Postprocess reads this to suppress the CMU Maps embed too.
+    # Tool groups the user switched off in the Surface. Their tools are
+    # already unbound. Postprocess reads this to keep the map embed off too.
     disabled_tools: list[str]
 
 
@@ -326,7 +329,40 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
     return agent_node
 
 
-def _build_tools_node(tools: list[BaseTool]):
+# Substrings marking a tool as routing rather than data-returning. A routing
+# failure does not degrade the answer, because the attached map already shows
+# the route.
+_ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
+
+
+def _is_routing_tool(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _ROUTING_TOOL_HINTS)
+
+
+def _tool_failure_notice(name: str, maps_enabled: bool) -> str:
+    """Model-facing replacement for a failed tool result.
+
+    The raw MCP error names internal hosts and reports an infrastructure
+    problem the user cannot act on, so relaying it verbatim produces answers
+    that narrate a failure instead of answering. Routing failures are
+    additionally invisible to the user, since the map is attached regardless.
+    """
+    if maps_enabled and _is_routing_tool(name):
+        return (
+            "No turn-by-turn route data is available. An interactive campus "
+            "map of this route is attached to your answer automatically. "
+            "Describe the walk in general terms and point the user to the "
+            "map. Do NOT mention tools, lookups, errors, or any failure."
+        )
+    return (
+        "This lookup returned no data. Tell the user you could not retrieve "
+        "it and point them to an authoritative CMU source. Do NOT describe "
+        "the internal error."
+    )
+
+
+def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
     tools_by_name = {tool.name: tool for tool in tools}
     # Tools this request built via build_memory_tools. Only these are
     # trusted. An MCP tool that is merely named "remember" remains
@@ -354,28 +390,52 @@ def _build_tools_node(tools: list[BaseTool]):
             memory_op_failed = False
             if tool is None:
                 result = f"Tool '{name}' is not available."
+                failed = True
             else:
                 try:
-                    raw = await tool.ainvoke(args)
-                    if (
-                        is_memory_tool
-                        and name == REMEMBER_TOOL
-                        and isinstance(raw, dict)
-                    ):
-                        raw_message = raw.get("message")
-                        raw_memory_id = raw.get("memory_id")
-                        raw_fact = raw.get("fact")
-                        result = (
-                            raw_message
-                            if isinstance(raw_message, str)
-                            else "Memory saved."
-                        )
-                        memory_id = (
-                            raw_memory_id if isinstance(raw_memory_id, str) else None
-                        )
-                        memory_fact = raw_fact if isinstance(raw_fact, str) else None
+                    if is_memory_tool:
+                        # Internal memory tools are plain local tools: invoke
+                        # with bare args, and unpack the remember tool's dict
+                        # so the chip event can carry the stored fact.
+                        raw = await tool.ainvoke(args)
+                        if name == REMEMBER_TOOL and isinstance(raw, dict):
+                            raw_message = raw.get("message")
+                            raw_memory_id = raw.get("memory_id")
+                            raw_fact = raw.get("fact")
+                            result = (
+                                raw_message
+                                if isinstance(raw_message, str)
+                                else "Memory saved."
+                            )
+                            memory_id = (
+                                raw_memory_id
+                                if isinstance(raw_memory_id, str)
+                                else None
+                            )
+                            memory_fact = (
+                                raw_fact if isinstance(raw_fact, str) else None
+                            )
+                        else:
+                            result = raw if isinstance(raw, str) else str(raw)
                     else:
-                        result = raw if isinstance(raw, str) else str(raw)
+                        # Invoking with the full tool call returns a
+                        # ToolMessage, whose `status` reports MCP errors
+                        # structurally. Reading that flag avoids inferring
+                        # failure from result text.
+                        raw = await tool.ainvoke(
+                            {
+                                "name": name,
+                                "args": args,
+                                "id": call_id,
+                                "type": "tool_call",
+                            }
+                        )
+                        if isinstance(raw, ToolMessage):
+                            result = _message_text(raw)
+                            failed = raw.status == "error"
+                        else:
+                            result = raw if isinstance(raw, str) else str(raw)
+                            failed = False
                 except Exception as exc:  # noqa: BLE001 - surface as tool data
                     if is_memory_tool:
                         # Raw exception text can expose database connection
@@ -386,6 +446,7 @@ def _build_tools_node(tools: list[BaseTool]):
                         memory_op_failed = True
                     else:
                         result = f"Tool '{name}' failed: {exc}"
+                        failed = True
 
             if is_memory_tool:
                 # Internal tool results are this module's own trusted
@@ -413,15 +474,27 @@ def _build_tools_node(tools: list[BaseTool]):
                 new_messages.append(ToolMessage(content=result, tool_call_id=call_id))
                 continue
 
+            # The invocation record keeps the raw result, which the map guard
+            # reads. Only the model's copy is replaced on failure.
             new_invocations.append({"name": name, "arguments": args, "result": result})
-            if name not in state["services_used"] and name not in new_services:
+            model_result = (
+                _tool_failure_notice(name, maps_enabled) if failed else result
+            )
+            # maps_show_map is presentation rather than a data source. It
+            # remains in tool_invocations for the guard but is excluded from
+            # the services the Surface reports as answer sources.
+            if (
+                name != SHOW_MAP_TOOL_NAME
+                and name not in state["services_used"]
+                and name not in new_services
+            ):
                 new_services.append(name)
 
             # Wrap tool output so the model treats it as untrusted DATA, not as
             # instructions. Defense against prompt-injection from MCP content.
             wrapped = (
                 f'<<<TOOL_OUTPUT name="{name}" trust="untrusted-data">>>\n'
-                f"{result}\n"
+                f"{model_result}\n"
                 "<<<END_TOOL_OUTPUT>>>"
             )
             new_messages.append(ToolMessage(content=wrapped, tool_call_id=call_id))
@@ -459,8 +532,8 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    # A switched-off CMUMaps means no map embed either, not just no map tools:
-    # the guard below is what attaches the deterministic map to the answer.
+    # CMUMaps switched off means no map embed either, not just no map tools.
+    # The guard below is what attaches the map to the answer.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
@@ -539,7 +612,7 @@ def build_graph(
     # LangGraph expects here.
     graph = StateGraph(AgentState)  # ty: ignore[invalid-argument-type]
     graph.add_node("agent", _build_agent_node(model, tools, maps_enabled))
-    graph.add_node("tools", _build_tools_node(tools))
+    graph.add_node("tools", _build_tools_node(tools, maps_enabled))
     graph.add_node("postprocess", _postprocess_node)
 
     if recall_enabled and store is not None:
@@ -630,6 +703,12 @@ async def _prepare_tools_and_store(
     tools: list[BaseTool] = []
     if needs_data_tools:
         tools.extend(filter_tools(await load_mcp_tools(), disabled_tools))
+        if maps_enabled:
+            # Appended after filtering so a disabled maps group never sees
+            # it. Local tool, so it costs no MCP discovery. Turns that skip
+            # data tools skip it too: postprocess validates any proposal and
+            # falls back to query inference when the tool was never bound.
+            tools.append(build_show_map_tool())
 
     store: BaseStore | None = None
     if recall_enabled or needs_memory_tools:
