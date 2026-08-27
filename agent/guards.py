@@ -23,7 +23,7 @@ from .schema import ActionType, AgentResponse, Thought
 # refusal would itself be classified as a leak and discarded. prompts.py
 # interpolates these same constants, so the allowlist cannot drift from the
 # prompt.
-IDENTITY_PHRASE = "CMUGPT, an assistant for CMU campus information"
+IDENTITY_PHRASE = "Bark, an assistant for CMU campus information"
 CRISIS_RESOURCES_LINE = (
     "CMU CaPS (412-268-2922), the 988 Suicide & Crisis Lifeline, or CMU "
     "Police (412-268-2323)"

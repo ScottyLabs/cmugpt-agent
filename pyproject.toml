@@ -1,7 +1,7 @@
 [project]
 name = "cmugpt-agent"
 version = "0.1.0"
-description = "CMUGPT Agent for CMU campus information"
+description = "Bark Agent for CMU campus information"
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -1,4 +1,4 @@
-"""CI smoke tests for the CMUGPT agent HTTP surface.
+"""CI smoke tests for the Bark agent HTTP surface.
 
 These tests avoid live OpenRouter and MCP calls so the default CI pipeline can
 run without secrets. The existing live E2E scripts can still be run manually

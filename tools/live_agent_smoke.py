@@ -1,4 +1,4 @@
-"""Quick live smoke test for the CMUGPT agent via OpenRouter + MCP."""
+"""Quick live smoke test for the Bark agent via OpenRouter + MCP."""
 
 import asyncio
 import os

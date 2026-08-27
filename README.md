@@ -35,7 +35,7 @@ re-index any memory you need to retain. A fresh database needs no preparation
 beyond `CREATE EXTENSION vector`.
 
 Long-term memory stores only durable facts: facts distilled from chats and facts
-the user explicitly asks CMUGPT to remember. Raw user/assistant turns are not
+the user explicitly asks Bark to remember. Raw user/assistant turns are not
 stored or recalled as memory. The clear-memory endpoint also purges the legacy
 episode namespace so data written by older deployments can still be removed.
 

@@ -1,4 +1,4 @@
-"""End-to-end tests for the CMUGPT agent.
+"""End-to-end tests for the Bark agent.
 
 Runs against the live OpenRouter + MCP server configured in .env.
 Each test asserts:
