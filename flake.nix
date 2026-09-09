@@ -1,5 +1,5 @@
 {
-  description = "CMUGPT Agent";
+  description = "Bark Agent";
 
   nixConfig = {
     extra-substituters = [ "https://scottylabs.cachix.org" ];

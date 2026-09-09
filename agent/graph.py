@@ -1,4 +1,4 @@
-"""LangGraph implementation of the CMUGPT agent.
+"""LangGraph implementation of the Bark agent.
 
 A single compiled `StateGraph` is the one source of truth for both the
 non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP

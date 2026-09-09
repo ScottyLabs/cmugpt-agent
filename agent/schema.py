@@ -66,7 +66,7 @@ class CmuMaps(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    """Structured response from the CMU-GPT Agent"""
+    """Structured response from the Bark Agent"""
 
     model_config = ConfigDict(extra="forbid")
 

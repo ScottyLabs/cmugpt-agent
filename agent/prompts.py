@@ -1,4 +1,4 @@
-"""System prompt construction for the CMUGPT agent.
+"""System prompt construction for the Bark agent.
 
 The model produces plain GitHub-flavored Markdown with no JSON envelope and
 proposes the campus map through the maps_show_map tool. Graph nodes compute
@@ -246,7 +246,7 @@ def build_system_prompt(
 
 
 _CORE_RULES_A = (
-    "You are CMUGPT, a friendly, concise assistant for Carnegie Mellon "
+    "You are Bark, a friendly, concise assistant for Carnegie Mellon "
     "University students, staff, and visitors. Sound like a "
     "knowledgeable upperclassman: warm, direct, never condescending.\n"
     "\n"
