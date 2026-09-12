@@ -5,12 +5,12 @@ query with the map it must produce or the required abstention. Abstentions
 matter as much as hits, since a map on every building mention is worse than
 waiting for location intent.
 
-Run directly with uv run python ci_test/test_cmu_maps.py.
+Run with uv run pytest tests/unit/test_cmu_maps.py.
 """
 
 from typing import Any
 
-from agent.cmu_maps import _infer_cmu_maps, query_has_map_intent
+from cmugpt.maps.inference import _infer_cmu_maps, query_has_map_intent
 
 
 def _messages(query: str) -> list[dict[str, Any]]:
@@ -186,8 +186,8 @@ def test_show_map_outranks_routing_tool_ids() -> None:
 
 
 def test_show_map_tool_schema_matches_catalog() -> None:
-    from agent.buildings import LOCATION_ID_TO_LABEL
-    from agent.map_tool import BuildingCode, build_show_map_tool
+    from cmugpt.maps.buildings import LOCATION_ID_TO_LABEL
+    from cmugpt.maps.tool import BuildingCode, build_show_map_tool
 
     # StrEnum members are their own values. str() avoids ty tripping on the
     # runtime built enum's attributes.
@@ -211,23 +211,3 @@ def test_map_intent_matches_inference() -> None:
     for query in ABSTAIN_CASES:
         if query_has_map_intent(query):
             raise AssertionError(f"{query!r}: intent says yes, inference abstains")
-
-
-def run() -> None:
-    test_directions()
-    test_locations()
-    test_abstentions()
-    test_tool_invocations_win_over_query_text()
-    test_show_map_decides_location()
-    test_show_map_decides_directions()
-    test_show_map_same_origin_and_destination_is_location()
-    test_show_map_invalid_codes_fall_back()
-    test_show_map_last_call_wins()
-    test_show_map_outranks_routing_tool_ids()
-    test_show_map_tool_schema_matches_catalog()
-    test_map_intent_matches_inference()
-
-
-if __name__ == "__main__":
-    run()
-    print("CMU Maps inference tests passed.")

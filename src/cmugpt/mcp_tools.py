@@ -2,7 +2,7 @@
 
 Each `BaseTool` from `MultiServerMCPClient.get_tools()` opens its own
 streamable-HTTP session on invocation, so no session outlives a graph run.
-The graph wraps tool results itself (see `agent/graph.py`) because tool
+The graph wraps tool results itself (see `graph.py`) because tool
 output is untrusted data.
 
 Tools are grouped by service. The Surface disables groups per user

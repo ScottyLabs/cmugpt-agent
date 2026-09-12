@@ -25,10 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-import os
-import re
 from collections.abc import AsyncIterator
-from functools import lru_cache
 from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
@@ -46,36 +43,35 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.store.base import BaseStore
 from langgraph.types import StreamWriter
-from pydantic import SecretStr
 
-from .cmu_maps import SHOW_MAP_TOOL_NAME, _apply_cmu_maps_guard, query_has_map_intent
 from .guards import (
     REFUSAL_TEXT,
     StreamScrubber,
     apply_output_guard,
     apply_tool_transparency_guard,
-    asks_about_tools,
     canned_refusal_response,
     compute_thought,
     is_flagrant_injection,
     should_require_tool,
 )
-from .map_tool import build_show_map_tool
+from .llm import api_key, chat_model
+from .maps.inference import (
+    SHOW_MAP_TOOL_NAME,
+    _apply_cmu_maps_guard,
+    query_has_map_intent,
+)
 from .mcp_tools import (
-    filter_tools,
-    load_mcp_tools,
     normalize_disabled_groups,
-    select_tools_for_query,
 )
 from .memory import (
     FORGET_TOOL,
     REMEMBER_TOOL,
-    build_memory_tools,
     ensure_store,
     is_internal_memory_tool,
     learn,
     recall,
 )
+from .planning import helper_messages, prepare_tools_and_store, sanitize_history
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 from .token_limits import record_usage
@@ -84,21 +80,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
 StreamEvent = tuple[str, dict[str, Any]]
 
 
 # Safety limits rather than tuning parameters. The values are set high
 # enough that ordinary conversations never reach them, so they engage only
 # on anomalous input.
-
-# History is billed on every model pass. Sixty messages is thirty exchanges.
-_HISTORY_MAX_MESSAGES = 60
-_HISTORY_MAX_MESSAGE_CHARS = 12_000
-
-# User turns scanned for tool-group narrowing. Local regex only, no tokens.
-_HISTORY_HINT_TURNS = 20
 
 # Tool results are resent on every subsequent pass. Twelve thousand
 # characters accommodates every current CMU tool result, including the 9k
@@ -159,50 +146,6 @@ async def drain_background_tasks(timeout: float = 15.0) -> None:
     await asyncio.gather(*done, *pending, return_exceptions=True)
 
 
-_MEMORY_TOOL_RE = re.compile(
-    r"\b("
-    r"remember|don['\u2019]?t\s+forget|forget|delete\s+(?:my\s+)?memory|"
-    r"remove\s+(?:that|this|it|my\s+memory)|what\s+do\s+you\s+remember|"
-    r"what\s+do\s+you\s+know\s+about\s+me"
-    r")\b",
-    re.IGNORECASE,
-)
-
-_MEMORY_RECALL_RE = re.compile(
-    r"\b("
-    r"my|me|for\s+me|i['\u2019]?m|im|i\s+am|i\s+have|i\s+need|i\s+prefer|"
-    r"i\s+(?:like|love|enjoy|hate|dislike|want|wish|told|said|mentioned)|"
-    r"(?:do|did|can|could|would|should|have|am|was)\s+i|"
-    r"preference|prefer|allerg|diet|vegetarian|vegan|major|minor|class|"
-    r"favorite|favourite|schedule|recommend|suggest|where\s+should|"
-    r"what\s+should|about\s+me|know\s+me|remember\s+(?:about\s+)?me|"
-    r"based\s+on\s+(?:what|anything)\s+you\s+(?:know|remember)|"
-    r"what\s+do\s+you\s+remember|what\s+do\s+you\s+know\s+about\s+me"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _api_key() -> str:
-    return os.getenv("OPENROUTER_API_KEY", "")
-
-
-@lru_cache(maxsize=16)
-def _make_chat_model_for_key(model: str, api_key: str) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=model,
-        api_key=SecretStr(api_key),
-        base_url=OPENROUTER_BASE_URL,
-        # Report usage on the final stream chunk so the budget records
-        # measured consumption rather than estimates.
-        stream_usage=True,
-    )
-
-
-def _make_chat_model(model: str) -> ChatOpenAI:
-    return _make_chat_model_for_key(model, _api_key())
-
-
 def _message_text(message: AnyMessage | AIMessageChunk | None) -> str:
     if message is None:
         return ""
@@ -219,11 +162,6 @@ def _message_text(message: AnyMessage | AIMessageChunk | None) -> str:
     return "".join(parts)
 
 
-def _helper_messages(query: str) -> list[dict[str, Any]]:
-    """Minimal role/content list for the deterministic helpers."""
-    return [{"role": "user", "content": query}]
-
-
 def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
     return AgentResponse(
         thought=Thought(reasoning="Direct response", confidence=confidence),
@@ -232,60 +170,6 @@ def _fallback_response(text: str, confidence: float = 0.8) -> AgentResponse:
         response_text=text,
         metadata=Metadata(),
     )
-
-
-# A follow-up such as "what about Wean?" rarely repeats a data keyword, so
-# the last few user turns are scanned as well. A conversation that needed
-# tools then keeps them.
-_HISTORY_GATE_TURNS = 4
-
-
-def _needs_data_tools(
-    query: str,
-    message_history: list[dict[str, str]] | None = None,
-) -> bool:
-    """True when this turn should pay the MCP/tool-schema latency cost."""
-    if asks_about_tools(query):
-        return True
-    if should_require_tool(_helper_messages(query)):
-        return True
-    recent_user_turns = [
-        turn.get("content", "")
-        for turn in (message_history or [])
-        if turn.get("role") == "user" and isinstance(turn.get("content"), str)
-    ][-_HISTORY_GATE_TURNS:]
-    return any(
-        should_require_tool(_helper_messages(text)) for text in recent_user_turns
-    )
-
-
-_MEMORY_CONTEXT_TURNS = 5
-
-
-def _recent_history_texts(
-    message_history: list[dict[str, str]] | None,
-) -> list[str]:
-    if not message_history:
-        return []
-    return [
-        turn["content"]
-        for turn in message_history[-_MEMORY_CONTEXT_TURNS:]
-        if isinstance(turn.get("content"), str)
-    ]
-
-
-def _needs_memory_tools(query: str, history_texts: list[str] | None = None) -> bool:
-    """True when the model needs explicit remember/forget tools this turn."""
-    if _MEMORY_TOOL_RE.search(query):
-        return True
-    return any(_MEMORY_TOOL_RE.search(text) for text in history_texts or [])
-
-
-def _needs_memory_recall(query: str, history_texts: list[str] | None = None) -> bool:
-    """True when recalled user memory is likely to change the answer."""
-    if _MEMORY_RECALL_RE.search(query):
-        return True
-    return any(_MEMORY_RECALL_RE.search(text) for text in history_texts or [])
 
 
 def _had_tool_round(messages: list[AnyMessage]) -> bool:
@@ -356,7 +240,7 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
             has_data_tools
             and not normalize_disabled_groups(state.get("disabled_tools"))
             and not _had_tool_round(state["messages"])
-            and should_require_tool(_helper_messages(query))
+            and should_require_tool(helper_messages(query))
         )
         runnable = bound_required if force_tool else bound
 
@@ -636,7 +520,7 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
 
 async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
     query = state["query"]
-    msgs = _helper_messages(query)
+    msgs = helper_messages(query)
     invocations = state["tool_invocations"]
     services = state["services_used"]
 
@@ -773,55 +657,6 @@ def build_graph(
     return graph.compile(store=store)
 
 
-def _cap_history_text(content: str) -> str:
-    if len(content) <= _HISTORY_MAX_MESSAGE_CHARS:
-        return content
-    # Retain the head, since answers front-load the substance that
-    # follow-ups reference.
-    return content[:_HISTORY_MAX_MESSAGE_CHARS] + "\n[earlier turn truncated]"
-
-
-def _sanitize_history(
-    message_history: list[dict[str, str]] | None,
-) -> list[AnyMessage]:
-    """Convert caller history to sanitized LangChain messages.
-
-    We own the system prompt. Smuggled `system`/`tool` turns are an injection
-    vector, so only `user` and `assistant` turns are carried over.
-    """
-    if not message_history:
-        return []
-    out: list[AnyMessage] = []
-    for turn in message_history[-_HISTORY_MAX_MESSAGES:]:
-        role = turn.get("role")
-        content = turn.get("content")
-        if not isinstance(content, str):
-            continue
-        if role == "user":
-            out.append(HumanMessage(content=_cap_history_text(content)))
-        elif role == "assistant":
-            out.append(AIMessage(content=_cap_history_text(content)))
-    return out
-
-
-def _history_hint_texts(
-    message_history: list[dict[str, str]] | None,
-) -> list[str]:
-    """User turns supplied to tool-group narrowing.
-
-    Restricted to user turns because assistant turns reproduce tool data
-    verbatim and would therefore match every group.
-    """
-    if not message_history:
-        return []
-    texts = [
-        turn["content"]
-        for turn in message_history
-        if turn.get("role") == "user" and isinstance(turn.get("content"), str)
-    ]
-    return texts[-_HISTORY_HINT_TURNS:]
-
-
 def _initial_state(
     user_input: UserInput,
     message_history: list[dict[str, str]] | None,
@@ -830,7 +665,7 @@ def _initial_state(
 ) -> AgentState:
     prompt = build_system_prompt(tools, disabled_tools)
     messages: list[AnyMessage] = [SystemMessage(content=prompt)]
-    messages.extend(_sanitize_history(message_history))
+    messages.extend(sanitize_history(message_history))
     messages.append(HumanMessage(content=user_input.query))
     return AgentState(
         messages=messages,
@@ -848,57 +683,6 @@ def _initial_state(
     )
 
 
-async def _prepare_tools_and_store(
-    user_input: UserInput,
-    disabled_tools: list[str] | None,
-    message_history: list[dict[str, str]] | None,
-) -> tuple[list[BaseTool], BaseStore | None, bool, bool]:
-    """Plan the turn and prepare only the tools/store it can actually use.
-
-    Ordinary chat skips MCP discovery, schema binding, and store setup for
-    latency. Every turn still gets the canonical security policy. Disabled
-    tool groups are filtered out first, then the survivors are narrowed to
-    the query so a keyword match cannot re-bind a disabled group. Memory
-    tools are appended after, so a toggle can never remove them.
-    """
-    query = user_input.query
-    user_id = user_input.user_id
-
-    needs_data_tools = _needs_data_tools(query, message_history)
-    recent_texts = _recent_history_texts(message_history)
-    needs_memory_tools = bool(user_id) and _needs_memory_tools(query, recent_texts)
-    recall_enabled = bool(user_id) and _needs_memory_recall(query, recent_texts)
-    maps_enabled = "maps" not in normalize_disabled_groups(disabled_tools)
-
-    tools: list[BaseTool] = []
-    if needs_data_tools:
-        # Narrowing runs after the disabled-group filter so that a keyword
-        # match can never re-bind a disabled group.
-        mcp_tools = filter_tools(await load_mcp_tools(), disabled_tools)
-        tools.extend(
-            select_tools_for_query(
-                mcp_tools, query, _history_hint_texts(message_history)
-            )
-        )
-    if maps_enabled:
-        # Deliberately outside the data-tools gate: the map is the model's
-        # decision, so the tool must always be in its hands, keyword gating
-        # here would decide navigation before the model can. Local tool, so
-        # it costs no MCP discovery; the price is the catalog section on
-        # every turn. Postprocess still validates every proposal and query
-        # inference remains only a fallback.
-        tools.append(build_show_map_tool())
-
-    store: BaseStore | None = None
-    if recall_enabled or needs_memory_tools:
-        store = await ensure_store()
-
-    if user_id and needs_memory_tools and store is not None:
-        tools = [*tools, *build_memory_tools(store, user_id)]
-
-    return tools, store, recall_enabled, maps_enabled
-
-
 async def run_agent(
     user_input: UserInput,
     model: str = "openai/gpt-5.6-luna",
@@ -910,7 +694,7 @@ async def run_agent(
     `disabled_tools` lists the tool groups the user switched off in the Surface
     (`maps`, `courses`, `eats`, `guide`). Those tools are never bound.
     """
-    if not _api_key():
+    if not api_key():
         return _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
@@ -921,11 +705,11 @@ async def run_agent(
     if is_flagrant_injection(user_input.query):
         return canned_refusal_response()
 
-    tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
+    tools, store, recall_enabled, maps_enabled = await prepare_tools_and_store(
         user_input, disabled_tools, message_history
     )
     graph = build_graph(
-        _make_chat_model(model),
+        chat_model(model, stream_usage=True),
         tools,
         store,
         recall_enabled=recall_enabled,
@@ -952,7 +736,7 @@ async def stream_agent_response(
     disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Streaming entry point. Yields ('delta', ...) through ('done', ...)."""
-    if not _api_key():
+    if not api_key():
         fb = _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
@@ -968,11 +752,11 @@ async def stream_agent_response(
         yield ("done", refusal.model_dump())
         return
 
-    tools, store, recall_enabled, maps_enabled = await _prepare_tools_and_store(
+    tools, store, recall_enabled, maps_enabled = await prepare_tools_and_store(
         user_input, disabled_tools, message_history
     )
     graph = build_graph(
-        _make_chat_model(model),
+        chat_model(model, stream_usage=True),
         tools,
         store,
         recall_enabled=recall_enabled,

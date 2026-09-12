@@ -7,20 +7,17 @@ Each test asserts:
     * services_used is populated when the query requires data
     * schema fields are sane
 
-Run with: `uv run python tools/live_agent_e2e.py`
+Run with: `uv run python tests/live/live_agent_e2e.py`
 """
 
 import asyncio
 import re
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from agent import run_agent
-from agent.cmu_maps import _cmu_maps_success_text, _infer_cmu_maps
-from agent.schema import AgentResponse, UserInput
+from cmugpt import run_agent
+from cmugpt.maps.inference import _cmu_maps_success_text, _infer_cmu_maps
+from cmugpt.schema import AgentResponse, UserInput
 
 STALL_PHRASES = [
     "please hold on",

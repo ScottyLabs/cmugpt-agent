@@ -2,12 +2,10 @@ import json
 import logging
 import os
 import secrets
-import sys
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import uvicorn
@@ -17,13 +15,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from agent import UserInput, run_agent, stream_agent_response
-from agent.graph import drain_background_tasks
-from agent.memory import (
+from cmugpt import UserInput, run_agent, stream_agent_response
+from cmugpt.graph import drain_background_tasks
+from cmugpt.memory import (
     clear_memory,
     close_store,
     delete_memory_item,
@@ -34,14 +28,14 @@ from agent.memory import (
     store_is_ready,
     store_status,
 )
-from agent.moderation import (
+from cmugpt.moderation import (
     ALLOW,
     blocked_input_response,
     moderate_text,
     redacted_output_response,
 )
-from agent.title import generate_chat_title
-from agent.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
+from cmugpt.title import generate_chat_title
+from cmugpt.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
 
 logger = logging.getLogger(__name__)
 

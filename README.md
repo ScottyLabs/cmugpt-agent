@@ -1,6 +1,11 @@
-# Python Template
+# Bark Agent
 
-This project makes use of several excellent tools from [Astral](https://github.com/astral-sh), including [`uv`](https://github.com/astral-sh/uv), [`ruff`](https://github.com/astral-sh/ruff), and [`ty`](https://github.com/astral-sh/ty).
+The service behind Bark, ScottyLabs' campus assistant for Carnegie Mellon.
+The Surface (the web app and its server, a separate repo) sends each chat turn
+here. This service runs a LangGraph agent over OpenRouter models and the CMU
+MCP tools, keeps per-user memory in Postgres, and streams the answer back.
+
+Tooling is [`uv`](https://github.com/astral-sh/uv), [`ruff`](https://github.com/astral-sh/ruff), and [`ty`](https://github.com/astral-sh/ty) from [Astral](https://github.com/astral-sh).
 
 ## Setup
 
@@ -10,7 +15,7 @@ This project makes use of several excellent tools from [Astral](https://github.c
 uv sync
 ```
 
-Create a `.env` file with `OPENROUTER_API_KEY`, `MCP_SERVER_URL`,
+Copy `.env.example` to `.env` and fill in `OPENROUTER_API_KEY`, `MCP_SERVER_URL`,
 `OPENAI_API_KEY`, `AGENT_SHARED_SECRET`, and `DATABASE_URL`. For durable user
 memory, create a PostgreSQL database with pgvector and point `DATABASE_URL` at
 it (for example `postgresql:///cmugpt_agent?host=/tmp` for a local unix-socket
@@ -53,17 +58,26 @@ uv run pre-commit install --install-hooks
 - Format: `uv run ruff format`
 - Typecheck: `uv run ty check`
 - Lint: `uv run ruff check`
+- Test: `DATABASE_URL="" uv run pytest` (offline, in-memory store, the same command CI runs)
+
+The scripts in `tests/live/` call the real OpenRouter and MCP services and need
+the keys from `.env`:
+
+```sh
+uv run python tests/live/live_agent_smoke.py
+uv run python tests/live/live_agent_e2e.py
+```
 
 To run the FastAPI app locally with `uv` (the project uses `uv` for task execution), run:
 
 ```sh
-uv run python src/main.py
+uv run cmugpt-agent
 ```
 
 You can set the `PORT` environment variable to change the listening port (defaults to `5000`):
 
 ```sh
-PORT=8080 uv run python src/main.py
+PORT=8080 uv run cmugpt-agent
 ```
 
 Verify that memory is actually durable:

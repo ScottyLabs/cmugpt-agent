@@ -28,7 +28,7 @@
   languages.python.package = pkgs.python312;
 
   processes.agent = {
-    exec = "secretspec run --profile dev -- uv run python src/main.py";
+    exec = "secretspec run --profile dev -- uv run cmugpt-agent";
     env.PORT = "5000";
     ready.http.get = {
       port = 5000;

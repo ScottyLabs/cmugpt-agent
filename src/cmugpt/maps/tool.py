@@ -4,9 +4,9 @@ The model decides when a map belongs on the answer and which places it shows
 by calling this tool. The argument schema is an enum of catalog codes, so a
 nonexistent place fails validation before reaching the guard, which
 revalidates anyway. The tool returns a confirmation string only. The guard in
-agent/cmu_maps.py builds the URL and payload, never the model.
+maps/inference.py builds the URL and payload, never the model.
 
-Kept separate from agent/cmu_maps.py so that module remains framework-free.
+Kept separate from maps/inference.py so that module remains framework-free.
 """
 
 from enum import StrEnum
@@ -15,7 +15,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from .buildings import LOCATION_ID_TO_LABEL
-from .cmu_maps import SHOW_MAP_TOOL_NAME
+from .inference import SHOW_MAP_TOOL_NAME
 
 # Codes like 2SC are not valid Python identifiers, so member names carry a
 # prefix. Only the bare code values appear in the JSON schema and in the args

@@ -14,17 +14,13 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-# The repository root is searched first, matching the deployed uvicorn
-# working directory, then the package directory for wheel builds that ship
-# buildings.json as package data.
-_BUILDINGS_CANDIDATES = (
-    Path(__file__).resolve().parents[1] / "buildings.json",
-    Path(__file__).resolve().parent / "buildings.json",
-)
+# buildings.json ships inside this package, so one path serves both the
+# editable checkout and the built wheel.
+_BUILDINGS_PATH = Path(__file__).with_name("buildings.json")
 
 
 def _buildings_path() -> Path | None:
-    return next((p for p in _BUILDINGS_CANDIDATES if p.is_file()), None)
+    return _BUILDINGS_PATH if _BUILDINGS_PATH.is_file() else None
 
 
 # Trailing words generic enough that the distinctive part alone should also

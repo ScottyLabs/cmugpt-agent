@@ -6,7 +6,6 @@ search, dedup, and forget behave deterministically. The live extraction pass
 (``learn``) calls an LLM and is exercised by the manual E2E scripts instead.
 """
 
-import asyncio
 import re
 import zlib
 from collections.abc import Sequence
@@ -16,7 +15,7 @@ from typing import Any, cast
 from langgraph.store.base import IndexConfig
 from langgraph.store.memory import InMemoryStore
 
-from agent import memory
+from cmugpt import memory
 
 _EMBED_DIMS = 64
 
@@ -55,7 +54,7 @@ def assert_equal(actual: Any, expected: Any, label: str) -> None:
         raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
 
 
-async def _test_recall_roundtrip_and_isolation() -> None:
+async def test_recall_roundtrip_and_isolation() -> None:
     store = _indexed_store()
     await memory.add_fact(store, "u1", "Is a CS sophomore at CMU")
     await memory.add_fact(store, "u1", "Vegetarian, avoid meat dining recs")
@@ -73,7 +72,7 @@ async def _test_recall_roundtrip_and_isolation() -> None:
     assert_equal(other, "", "recall is isolated per user")
 
 
-async def _test_dedup_skips_duplicates() -> None:
+async def test_dedup_skips_duplicates() -> None:
     store = _indexed_store()
     first, first_status = await memory.add_fact(store, "u1", "Lives in Morewood")
     dup, dup_status = await memory.add_fact(
@@ -97,7 +96,7 @@ async def _test_dedup_skips_duplicates() -> None:
     )
 
 
-async def _test_explicit_save_promotes_learned_duplicate() -> None:
+async def test_explicit_save_promotes_learned_duplicate() -> None:
     store = _indexed_store()
     learned_id, _ = await memory.add_fact(
         store,
@@ -127,7 +126,7 @@ async def _test_explicit_save_promotes_learned_duplicate() -> None:
     )
 
 
-async def _test_forget_removes_best_match() -> None:
+async def test_forget_removes_best_match() -> None:
     store = _indexed_store()
     await memory.add_fact(store, "u1", "Allergic to peanuts")
     await memory.add_fact(store, "u1", "Prefers window seats")
@@ -146,7 +145,7 @@ async def _test_forget_removes_best_match() -> None:
     assert_true("No matching" in miss, "weak match is a no-op")
 
 
-async def _test_forget_tool_scales_from_one_to_everything() -> None:
+async def test_forget_tool_scales_from_one_to_everything() -> None:
     store = _indexed_store()
     tools = memory.build_memory_tools(store, "u1")
     forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
@@ -200,7 +199,7 @@ async def _test_forget_tool_scales_from_one_to_everything() -> None:
     assert_true("Forgot" in single, "single-fact forget still works")
 
 
-async def _test_forget_asks_when_ambiguous() -> None:
+async def test_forget_asks_when_ambiguous() -> None:
     store = _indexed_store()
     tools = memory.build_memory_tools(store, "u1")
     forget_tool = next(t for t in tools if t.name == memory.FORGET_TOOL)
@@ -227,7 +226,7 @@ async def _test_forget_asks_when_ambiguous() -> None:
     assert_true("shellfish" in remaining[0]["text"], "the other fact survives")
 
 
-async def _test_memory_tools_write_to_namespace() -> None:
+async def test_memory_tools_write_to_namespace() -> None:
     store = _indexed_store()
     tools = memory.build_memory_tools(store, "u1")
     assert_equal(
@@ -250,7 +249,7 @@ async def _test_memory_tools_write_to_namespace() -> None:
     assert_equal(await memory.list_facts(store, "u2"), [], "tools are user-scoped")
 
 
-async def _test_user_id_wildcard_cannot_cross_read() -> None:
+async def test_user_id_wildcard_cannot_cross_read() -> None:
     """A LIKE-wildcard user_id must not read another user's memory."""
     store = _indexed_store()
     await memory.add_fact(store, "alice", "Alice is allergic to shellfish")
@@ -278,14 +277,14 @@ async def _test_user_id_wildcard_cannot_cross_read() -> None:
     assert_equal(memory.build_memory_tools(store, "%"), [], "no tools for bad id")
 
 
-async def _test_recall_without_index_degrades() -> None:
+async def test_recall_without_index_degrades() -> None:
     store = InMemoryStore()  # no embeddings - recency fallback
     await memory.add_fact(store, "u1", "Plays club soccer on weekends")
     block = await memory.recall(store, "u1", "hobbies")
     assert_true("club soccer" in block, "recall works without an index")
 
 
-async def _test_clear_memory() -> None:
+async def test_clear_memory() -> None:
     store = _indexed_store()
     await memory.add_fact(store, "u1", "Uses a standing desk")
     await store.aput(
@@ -298,7 +297,7 @@ async def _test_clear_memory() -> None:
     assert_equal(await memory.list_facts(store, "u1"), [], "nothing remains")
 
 
-async def _test_management_search_and_typed_delete() -> None:
+async def test_management_search_and_typed_delete() -> None:
     store = InMemoryStore()
     await memory.add_fact(
         store, "u1", "Prefers quiet study spaces", source="extraction"
@@ -352,15 +351,15 @@ class _FakeExtractorModel:
         return _FakeExtractorReply()
 
 
-async def _test_learn_never_persists_raw_turns() -> None:
+async def test_learn_never_persists_raw_turns() -> None:
     store = InMemoryStore()
     user = "no-raw-chat-user"
-    memory._learn_history.pop(user, None)
+    memory.extraction._learn_history.pop(user, None)
     # The real extractor is a live LLM call, which this offline suite must
     # never make (CI has no model credentials). The stub returns a canned
     # extraction so the rest of learn's write path runs for real.
-    real_extractor = memory._extractor_model
-    memory._extractor_model = cast(Any, _FakeExtractorModel)
+    real_extractor = memory.extraction._extractor_model
+    memory.extraction._extractor_model = cast(Any, _FakeExtractorModel)
     try:
         await memory.learn(
             store,
@@ -369,7 +368,7 @@ async def _test_learn_never_persists_raw_turns() -> None:
             "Gates Center is on the east side of campus.",
         )
     finally:
-        memory._extractor_model = real_extractor
+        memory.extraction._extractor_model = real_extractor
     episodes = await store.asearch((user, "episodes"), limit=10)
     assert_equal(episodes, [], "background learning does not store transcript snippets")
     facts = await store.asearch((user, "facts"), limit=10)
@@ -379,7 +378,7 @@ async def _test_learn_never_persists_raw_turns() -> None:
     )
 
 
-async def _test_clear_memory_beyond_one_page() -> None:
+async def test_clear_memory_beyond_one_page() -> None:
     store = InMemoryStore()
     for i in range(1001):
         await store.aput(
@@ -393,7 +392,7 @@ async def _test_clear_memory_beyond_one_page() -> None:
     assert_equal(remaining, [], "clear leaves no episode beyond the old 1000 limit")
 
 
-async def _test_forget_keyword_fallback_without_index() -> None:
+async def test_forget_keyword_fallback_without_index() -> None:
     store = InMemoryStore()  # no embeddings
     await memory.add_fact(store, "u1", "Allergic to peanuts")
     await memory.add_fact(store, "u1", "Prefers window seats")
@@ -408,11 +407,11 @@ async def _test_forget_keyword_fallback_without_index() -> None:
     assert_equal(remaining, ["Prefers window seats"], "only the match removed")
 
 
-async def _test_growth_caps_prune_oldest() -> None:
-    original_facts = memory._MAX_FACTS
-    original_every = memory._CAP_CHECK_EVERY
-    memory._MAX_FACTS = 3
-    memory._CAP_CHECK_EVERY = 1  # cap checks are amortized; force every write
+async def test_growth_caps_prune_oldest() -> None:
+    original_facts = memory.facts.MAX_FACTS
+    original_every = memory.facts.CAP_CHECK_EVERY
+    memory.facts.MAX_FACTS = 3
+    memory.facts.CAP_CHECK_EVERY = 1  # cap checks are amortized; force every write
     try:
         store = _indexed_store()
         for i in range(5):
@@ -424,17 +423,17 @@ async def _test_growth_caps_prune_oldest() -> None:
             "newest facts survive, oldest evicted",
         )
     finally:
-        memory._MAX_FACTS = original_facts
-        memory._CAP_CHECK_EVERY = original_every
+        memory.facts.MAX_FACTS = original_facts
+        memory.facts.CAP_CHECK_EVERY = original_every
 
 
-async def _test_explicit_facts_evicted_last() -> None:
+async def test_explicit_facts_evicted_last() -> None:
     """At the cap, auto-extracted facts are dropped before explicit saves,
     even when the explicit saves are older."""
-    original = memory._MAX_FACTS
-    original_every = memory._CAP_CHECK_EVERY
-    memory._MAX_FACTS = 3
-    memory._CAP_CHECK_EVERY = 1
+    original = memory.facts.MAX_FACTS
+    original_every = memory.facts.CAP_CHECK_EVERY
+    memory.facts.MAX_FACTS = 3
+    memory.facts.CAP_CHECK_EVERY = 1
     try:
         store = _indexed_store()
         await memory.add_fact(store, "u1", "Shellfish allergy warning", source="tool")
@@ -461,38 +460,42 @@ async def _test_explicit_facts_evicted_last() -> None:
             "newest extracted fact survives",
         )
     finally:
-        memory._MAX_FACTS = original
-        memory._CAP_CHECK_EVERY = original_every
+        memory.facts.MAX_FACTS = original
+        memory.facts.CAP_CHECK_EVERY = original_every
 
 
-def _test_learn_rate_limit() -> None:
+def test_learn_rate_limit() -> None:
     """The learn budget blocks rapid-fire runs and enforces the hourly cap."""
     user = "rate-limit-user"
-    memory._learn_history.pop(user, None)
+    memory.extraction._learn_history.pop(user, None)
     try:
-        assert_true(memory._learn_allowed(user, now=0.0), "first run allowed")
         assert_true(
-            not memory._learn_allowed(user, now=1.0),
+            memory.extraction._learn_allowed(user, now=0.0), "first run allowed"
+        )
+        assert_true(
+            not memory.extraction._learn_allowed(user, now=1.0),
             "run inside the minimum interval is blocked",
         )
         assert_true(
-            memory._learn_allowed(user, now=30.0),
+            memory.extraction._learn_allowed(user, now=30.0),
             "run after the minimum interval is allowed",
         )
 
         allowed = 2  # the two successful runs above
         now = 30.0
         for _ in range(200):
-            now += memory._LEARN_MIN_INTERVAL_SECONDS
-            if memory._learn_allowed(user, now=now):
+            now += memory.extraction.LEARN_MIN_INTERVAL_SECONDS
+            if memory.extraction._learn_allowed(user, now=now):
                 allowed += 1
-        assert_equal(allowed, memory._LEARN_MAX_PER_HOUR, "hourly ceiling enforced")
+        assert_equal(
+            allowed, memory.extraction.LEARN_MAX_PER_HOUR, "hourly ceiling enforced"
+        )
     finally:
-        memory._learn_history.pop(user, None)
+        memory.extraction._learn_history.pop(user, None)
 
 
-def _test_prompt_memory_section() -> None:
-    from agent.prompts import build_system_prompt
+def test_prompt_memory_section() -> None:
+    from cmugpt.prompts import build_system_prompt
 
     tools = memory.build_memory_tools(InMemoryStore(), "u1")
     with_memory = build_system_prompt(tools)
@@ -513,43 +516,16 @@ def _test_prompt_memory_section() -> None:
     )
 
 
-def _test_parse_facts_is_tolerant() -> None:
-    assert_equal(memory._parse_facts('["a", "b"]'), ["a", "b"], "plain array")
+def test_parse_facts_is_tolerant() -> None:
     assert_equal(
-        memory._parse_facts('Here you go:\n["x"]\nthanks'),
+        memory.extraction._parse_facts('["a", "b"]'), ["a", "b"], "plain array"
+    )
+    assert_equal(
+        memory.extraction._parse_facts('Here you go:\n["x"]\nthanks'),
         ["x"],
         "array embedded in prose",
     )
-    assert_equal(memory._parse_facts("not json at all"), [], "non-json -> empty")
-    assert_equal(memory._parse_facts("[]"), [], "empty array -> empty")
-
-
-async def _run_async() -> None:
-    await _test_recall_roundtrip_and_isolation()
-    await _test_dedup_skips_duplicates()
-    await _test_explicit_save_promotes_learned_duplicate()
-    await _test_forget_removes_best_match()
-    await _test_forget_tool_scales_from_one_to_everything()
-    await _test_forget_asks_when_ambiguous()
-    await _test_memory_tools_write_to_namespace()
-    await _test_user_id_wildcard_cannot_cross_read()
-    await _test_recall_without_index_degrades()
-    await _test_clear_memory()
-    await _test_management_search_and_typed_delete()
-    await _test_learn_never_persists_raw_turns()
-    await _test_clear_memory_beyond_one_page()
-    await _test_forget_keyword_fallback_without_index()
-    await _test_growth_caps_prune_oldest()
-    await _test_explicit_facts_evicted_last()
-
-
-def run() -> None:
-    asyncio.run(_run_async())
-    _test_parse_facts_is_tolerant()
-    _test_prompt_memory_section()
-    _test_learn_rate_limit()
-
-
-if __name__ == "__main__":
-    run()
-    print("Memory tests passed.")
+    assert_equal(
+        memory.extraction._parse_facts("not json at all"), [], "non-json -> empty"
+    )
+    assert_equal(memory.extraction._parse_facts("[]"), [], "empty array -> empty")

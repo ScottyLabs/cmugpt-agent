@@ -6,17 +6,13 @@ agent turn, so it must stay cheap.
 
 import logging
 import os
-from functools import lru_cache
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
-from agent.moderation import ALLOW, moderate_text
+from .llm import api_key, chat_model
+from .moderation import ALLOW, moderate_text
 
 logger = logging.getLogger(__name__)
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 _MAX_INPUT_CHARS = 600
 _MAX_TITLE_CHARS = 48
@@ -33,19 +29,6 @@ def _title_model_name() -> str:
     return os.getenv("TITLE_MODEL", "qwen/qwen3.7-flash")
 
 
-@lru_cache(maxsize=4)
-def _title_model_for_key(model: str, api_key: str) -> ChatOpenAI:
-    # Cached so repeated titles reuse one HTTP client (keep-alive) instead of
-    # a new TLS handshake per chat.
-    return ChatOpenAI(
-        model=model,
-        api_key=SecretStr(api_key),
-        base_url=OPENROUTER_BASE_URL,
-        temperature=0.0,
-        extra_body={"reasoning": {"enabled": False}},
-    )
-
-
 def _clean(raw: str) -> str | None:
     """Normalize model output into a display-safe title, or None if empty."""
     title = raw.strip().split("\n")[0].strip().strip("\"'" + "\u201c\u201d")
@@ -59,9 +42,8 @@ def _clean(raw: str) -> str | None:
 
 async def generate_chat_title(first_message: str) -> str | None:
     """Return a short title for the chat, or None on failure."""
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
     text = first_message.strip()
-    if not api_key or not text:
+    if not api_key() or not text:
         return None
     # A flagged first message must not be echoed into a title. "New chat" is
     # the surface's default title, so returning it both neutralizes the title
@@ -69,7 +51,7 @@ async def generate_chat_title(first_message: str) -> str | None:
     verdict = await moderate_text(text)
     if verdict.action != ALLOW:
         return "New chat"
-    model = _title_model_for_key(_title_model_name(), api_key)
+    model = chat_model(_title_model_name(), temperature=0.0, reasoning_off=True)
     try:
         reply = await model.ainvoke(
             [

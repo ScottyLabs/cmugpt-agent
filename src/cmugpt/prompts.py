@@ -14,8 +14,6 @@ from collections.abc import Iterable
 
 from langchain_core.tools import BaseTool
 
-from .buildings import CURATED_NICKNAMES, LOCATION_ID_TO_LABEL
-
 # Interpolated below so that the output guard's echo allowlist cannot drift
 # from what the prompt actually instructs the model to say.
 from .guards import (
@@ -24,6 +22,7 @@ from .guards import (
     IDENTITY_PHRASE,
     REFUSAL_TEXT,
 )
+from .maps.buildings import CURATED_NICKNAMES, LOCATION_ID_TO_LABEL
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups, tool_group
 from .memory import is_internal_memory_tool
 

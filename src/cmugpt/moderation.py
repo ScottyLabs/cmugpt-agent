@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 import httpx
 
-from agent.schema import ActionType, AgentResponse, Metadata, Thought
+from .schema import ActionType, AgentResponse, Metadata, Thought
 
 logger = logging.getLogger(__name__)
 

@@ -5,16 +5,13 @@ import os
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
 from dotenv import load_dotenv
 
-from agent import run_agent
-from agent.mcp_tools import load_mcp_tools
-from agent.schema import UserInput
+from cmugpt import run_agent
+from cmugpt.mcp_tools import load_mcp_tools
+from cmugpt.schema import UserInput
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")

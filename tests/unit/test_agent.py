@@ -12,15 +12,17 @@ from http import HTTPStatus
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
 
-from agent import graph as graph_module
-from agent.mcp_tools import disabled_group_labels, filter_tools, tool_group
-from agent.prompts import build_system_prompt
-from agent.schema import ActionType, AgentResponse, Thought, UserInput
-from src import main as app_module
+from cmugpt import api as app_module
+from cmugpt import graph as graph_module
+from cmugpt import planning
+from cmugpt.mcp_tools import disabled_group_labels, filter_tools, tool_group
+from cmugpt.prompts import build_system_prompt
+from cmugpt.schema import ActionType, AgentResponse, Thought, UserInput
 
 
 @contextmanager
@@ -68,6 +70,19 @@ async def fake_run_agent(
         ),
         services_used=[],
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep the suite independent of a developer's local .env. The dedicated
+    # shared-secret test below sets and verifies authentication explicitly.
+    monkeypatch.delenv("AGENT_SHARED_SECRET", raising=False)
+
+
+@pytest.fixture
+def client() -> Iterator[TestClient]:
+    with patch.object(app_module, "run_agent", fake_run_agent):
+        yield TestClient(app_module.app)
 
 
 def test_health(client: TestClient) -> None:
@@ -228,34 +243,34 @@ def test_production_requires_database_and_shared_secret() -> None:
 
 def test_latency_planner_keeps_generic_turns_tool_free() -> None:
     assert_true(
-        not graph_module._needs_data_tools("Reply with exactly one short sentence."),
+        not planning.needs_data_tools("Reply with exactly one short sentence."),
         "generic turn skips MCP tools",
     )
     assert_true(
-        not graph_module._needs_memory_tools("Reply with exactly one short sentence."),
+        not planning.needs_memory_tools("Reply with exactly one short sentence."),
         "generic turn skips memory tools",
     )
     assert_true(
-        not graph_module._needs_memory_recall("Reply with exactly one short sentence."),
+        not planning.needs_memory_recall("Reply with exactly one short sentence."),
         "generic turn skips memory recall",
     )
 
 
 def test_latency_planner_preserves_memory_tools() -> None:
     assert_true(
-        graph_module._needs_memory_tools("Remember that I am vegetarian."),
+        planning.needs_memory_tools("Remember that I am vegetarian."),
         "explicit remember keeps memory tools",
     )
     assert_true(
-        graph_module._needs_memory_recall("Where should I eat on campus?"),
+        planning.needs_memory_recall("Where should I eat on campus?"),
         "personalized recommendation recalls memory",
     )
     assert_true(
-        graph_module._needs_memory_recall("What animal do I like?"),
+        planning.needs_memory_recall("What animal do I like?"),
         "personal fact question recalls memory",
     )
     assert_true(
-        graph_module._needs_memory_recall("What did I tell you earlier?"),
+        planning.needs_memory_recall("What did I tell you earlier?"),
         "question about an earlier user statement recalls memory",
     )
 
@@ -266,16 +281,16 @@ def test_data_tool_gate_scans_recent_history() -> None:
         {"role": "assistant", "content": "Gates is on Forbes."},
     ]
     assert_true(
-        graph_module._needs_data_tools("what about Wean Hall?", history),
+        planning.needs_data_tools("what about Wean Hall?", history),
         "follow-up turn keeps data tools via history",
     )
     assert_true(
-        not graph_module._needs_data_tools("what about Wean Hall?", None),
+        not planning.needs_data_tools("what about Wean Hall?", None),
         "same text without history still skips tools",
     )
     small_talk = [{"role": "user", "content": "hello"}]
     assert_true(
-        not graph_module._needs_data_tools("thanks!", small_talk),
+        not planning.needs_data_tools("thanks!", small_talk),
         "non-data threads still skip tools",
     )
 
@@ -466,38 +481,3 @@ def test_agent_respond_rejects_malformed_disabled_tools(client: TestClient) -> N
     assert_true(
         "disabled_tools" in payload["detail"], "malformed disabled_tools detail"
     )
-
-
-def run() -> None:
-    # Keep smoke tests independent of a developer's local .env. The dedicated
-    # shared-secret test below sets and verifies authentication explicitly.
-    with temporary_env("AGENT_SHARED_SECRET", None):
-        run_tests()
-
-
-def run_tests() -> None:
-    test_tool_group_mapping()
-    test_filter_tools_drops_only_disabled_groups()
-    test_filter_tools_accepts_labels_and_ignores_junk()
-    test_prompt_hides_disabled_tools()
-    with patch.object(app_module, "run_agent", fake_run_agent):
-        client = TestClient(app_module.app)
-        test_health(client)
-        test_agent_respond_accepts_supported_payload_shapes(client)
-        test_agent_respond_rejects_invalid_payload(client)
-        test_agent_respond_enforces_input_caps(client)
-        test_memory_endpoints_reject_wildcard_user_id(client)
-        test_agent_respond_enforces_shared_secret(client)
-        test_production_requires_database_and_shared_secret()
-        test_latency_planner_keeps_generic_turns_tool_free()
-        test_latency_planner_preserves_memory_tools()
-        test_data_tool_gate_scans_recent_history()
-        test_force_latch_counts_memory_tool_rounds()
-        test_every_llm_turn_uses_the_canonical_system_prompt()
-        test_agent_respond_forwards_disabled_tools(client)
-        test_agent_respond_rejects_malformed_disabled_tools(client)
-
-
-if __name__ == "__main__":
-    run()
-    print("Agent smoke tests passed.")

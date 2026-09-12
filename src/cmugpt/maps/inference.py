@@ -1,6 +1,6 @@
 """Deterministic CMU Maps validation and fallback inference.
 
-The model's maps_show_map call (agent/map_tool.py) is the primary source of
+The model's maps_show_map call (maps/tool.py) is the primary source of
 the map attached to an answer, since the model reads phrasing and history no
 pattern list can. This module is the deterministic layer around that decision.
 It validates the model's codes against the catalog, builds the URL, and falls
@@ -13,13 +13,13 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from ..guards import latest_user_text
+from ..schema import AgentResponse, CmuMaps
 from .buildings import (
     KNOWN_CMU_LOCATIONS,
     LOCATION_ID_TO_LABEL,
     normalize,
 )
-from .guards import latest_user_text
-from .schema import AgentResponse, CmuMaps
 
 CMU_MAPS_BASE_URL = "https://maps.scottylabs.org"
 
@@ -38,7 +38,7 @@ CMU_MAPS_QUERY_RE = re.compile(
 )
 
 # KNOWN_CMU_LOCATIONS maps aliases to codes and names, LOCATION_ID_TO_LABEL
-# maps codes to names. Both derive from buildings.json in agent/buildings.py.
+# maps codes to names. Both derive from buildings.json in maps/buildings.py.
 LOCATION_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,4}\b")
 PAREN_LOCATION_RE = re.compile(
     r"(?P<label>[A-Z][A-Za-z0-9 '&.-]{1,80})\s*\((?P<id>[A-Z0-9]{2,5})\)"
