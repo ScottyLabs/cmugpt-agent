@@ -10,12 +10,12 @@ and prompt-leak scrubbing of outgoing text, a streaming holdback scrubber,
 and a zero-token fast path for flagrant injection attempts.
 """
 
-import os
 import re
 from typing import Any
 from urllib.parse import urlparse
 
 from .schema import ActionType, AgentResponse, Thought
+from .settings import get_settings
 
 # Strings the prompt explicitly instructs the model to echo. The leak
 # detector must exempt them, since otherwise a legitimate crisis response or
@@ -167,12 +167,6 @@ _REDACTION = "[redacted]"
 # Environment variables whose live values must never reach the user. The
 # model does not observe most of them, but tool errors and misconfigured
 # servers can propagate them into output.
-_SECRET_ENV_NAMES = (
-    "OPENROUTER_API_KEY",
-    "AGENT_SHARED_SECRET",
-    "MCP_SERVER_URL",
-    "DATABASE_URL",
-)
 
 # The scrubber skips secret values that overlap these public URLs, since
 # redacting them would corrupt every legitimate map link.
@@ -201,8 +195,15 @@ def _normalize_leak_text(text: str) -> str:
 
 def _secret_values() -> list[str]:
     values: list[str] = []
-    for name in _SECRET_ENV_NAMES:
-        value = (os.getenv(name) or "").strip()
+    settings = get_settings()
+    secrets = (
+        settings.openrouter_api_key,
+        settings.agent_shared_secret,
+        settings.mcp_server_url,
+        settings.database_url,
+    )
+    for raw in secrets:
+        value = raw.strip()
         if len(value) < _MIN_SECRET_CHARS:
             continue
         if any(value in public for public in _PUBLIC_URL_PREFIXES):

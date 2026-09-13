@@ -1,15 +1,14 @@
-"""The memory store itself: one LangGraph store per process.
+"""Process-wide LangGraph store for user memory.
 
-Postgres with pgvector when DATABASE_URL is set, otherwise an in-memory store
-for development and CI. This module owns setup, shutdown, the health probe,
-and the single search chokepoint every other memory module reads through.
+Uses Postgres with pgvector when DATABASE_URL is set and an in-memory store
+otherwise. Owns setup, shutdown, the readiness check, and search(), the
+single read path the other memory modules use.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -17,6 +16,8 @@ from typing import Any, cast
 from langchain_openai import OpenAIEmbeddings
 from langgraph.store.base import BaseStore, IndexConfig, SearchItem
 from langgraph.store.memory import InMemoryStore
+
+from ..settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _embeddings() -> OpenAIEmbeddings | None:
 
     Without embeddings the store still works, but recall degrades to recency.
     """
-    if not os.getenv("OPENAI_API_KEY"):
+    if not get_settings().openai_api_key:
         return None
     return OpenAIEmbeddings(model=_EMBED_MODEL, dimensions=_EMBED_DIMS)
 
@@ -98,7 +99,7 @@ async def setup_store() -> BaseStore:
         if cached is not None:
             return cached
         index = _index_config()
-        db_url = os.getenv("DATABASE_URL")
+        db_url = get_settings().database_url
         store: BaseStore
         if db_url:
             try:
@@ -153,21 +154,20 @@ def store_status() -> dict[str, Any]:
 
     Before init, reports the backend implied by the environment.
     """
+    settings = get_settings()
     if _store is not None:
         backend = "postgres" if _pg_cm is not None else "in-memory"
         initialized = True
     else:
-        backend = "postgres" if os.getenv("DATABASE_URL") else "in-memory"
+        backend = "postgres" if settings.database_url else "in-memory"
         initialized = False
     return {
         "backend": backend,
         "initialized": initialized,
         "semantic_search": (
-            has_index(_store)
-            if _store is not None
-            else bool(os.getenv("OPENAI_API_KEY"))
+            has_index(_store) if _store is not None else bool(settings.openai_api_key)
         ),
-        "embedding_model": _EMBED_MODEL if os.getenv("OPENAI_API_KEY") else None,
+        "embedding_model": _EMBED_MODEL if settings.openai_api_key else None,
     }
 
 

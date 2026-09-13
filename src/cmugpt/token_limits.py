@@ -1,8 +1,8 @@
 """Per-user daily token budget.
 
-Usage is persisted to SQLite because the Procfile runs two uvicorn workers.
-A per-process counter would give each worker an independent budget and so
-double the effective limit.
+Usage is persisted to SQLite rather than held in memory, so the budget
+survives a restart and stays shared if the service ever runs more than one
+worker process. A per-process counter would give each worker its own budget.
 
 Enforcement is a soft ceiling: the request that exceeds the limit still
 completes, and the request after it is rejected.
@@ -12,9 +12,10 @@ Surface to authenticate its users and on AGENT_SHARED_SECRET to restrict
 direct callers.
 """
 
-import os
 import sqlite3
 from datetime import UTC, datetime
+
+from .settings import get_settings
 
 # Total tokens (input + output) one user may spend per UTC day.
 DAILY_TOKEN_LIMIT = 1_000_000
@@ -49,7 +50,7 @@ class DailyTokenLimitExceeded(Exception):
 def _db_path() -> str:
     # Loss of the default file on redeploy resets accumulated usage. The
     # failure mode is therefore under-counting, never a spurious block.
-    return os.getenv("TOKEN_USAGE_DB", "/tmp/cmugpt_token_usage.sqlite3")
+    return get_settings().token_usage_db
 
 
 def _today() -> str:

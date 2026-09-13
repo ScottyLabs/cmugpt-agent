@@ -27,7 +27,6 @@ import operator
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, TypedDict
 
-from dotenv import load_dotenv
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -74,8 +73,6 @@ from .planning import helper_messages, prepare_tools_and_store, sanitize_history
 from .prompts import build_system_prompt
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
 from .token_limits import record_usage
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 

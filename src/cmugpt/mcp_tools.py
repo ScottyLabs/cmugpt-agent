@@ -13,18 +13,15 @@ tokens on every model pass.
 
 import asyncio
 import logging
-import os
 import re
 import time
 from collections.abc import Iterable
 
-from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from .guards import CMU_DATA_RE
-
-load_dotenv()
+from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +194,7 @@ _cache_lock = asyncio.Lock()
 def _server_url() -> str:
     # Read at call time so that dotenv ordering and runtime environment
     # changes are respected.
-    return os.getenv("MCP_SERVER_URL", "")
+    return get_settings().mcp_server_url
 
 
 def _build_client(url: str) -> MultiServerMCPClient:

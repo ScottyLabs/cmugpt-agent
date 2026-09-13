@@ -1,24 +1,24 @@
-"""Builds the chat models this service reaches through OpenRouter.
+"""Factory for the OpenRouter chat model clients.
 
-Every LangChain model object is created here, so the agent graph, background
-memory extraction, and chat titles share one client per configuration. A
-cached client keeps its HTTP connection open, which saves a TLS handshake on
-every call after the first.
+All ChatOpenAI instances are created here, so the agent graph, memory
+extraction, and title generation share one cached client per configuration.
+A reused client keeps its HTTP connection open across calls.
 """
 
-import os
 from functools import lru_cache
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from .settings import get_settings
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def api_key() -> str:
     """The OpenRouter key from the environment, or an empty string."""
-    return os.getenv("OPENROUTER_API_KEY", "")
+    return get_settings().openrouter_api_key
 
 
 @lru_cache(maxsize=32)
@@ -31,12 +31,12 @@ def _build(
 ) -> ChatOpenAI:
     extra: dict[str, Any] = {}
     if stream_usage:
-        # The last streamed chunk then carries real token counts, which the
-        # daily budget records instead of estimating from text length.
+        # The final streamed chunk then carries measured token counts, which
+        # the daily budget records instead of an estimate from text length.
         extra["stream_usage"] = True
     if reasoning_off:
-        # Some OpenRouter models think out loud before answering. That is
-        # wasted on a one-line title, so a caller can switch it off.
+        # Reasoning models emit a thinking phase before the answer. Callers that
+        # need a one-line reply, such as title generation, disable it.
         extra["extra_body"] = {"reasoning": {"enabled": False}}
     return ChatOpenAI(
         model=model,

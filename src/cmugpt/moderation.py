@@ -7,12 +7,12 @@ support resources rather than a refusal.
 """
 
 import logging
-import os
 from typing import NamedTuple
 
 import httpx
 
 from .schema import ActionType, AgentResponse, Metadata, Thought
+from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def _exceeded(scores: dict, thresholds: dict[str, float]) -> list[str]:
 
 async def moderate_text(text: str) -> Verdict:
     """Classify ``text``, failing open to ALLOW on any error."""
-    api_key = os.getenv("OPENAI_API_KEY", "")
+    api_key = get_settings().openai_api_key
     if not api_key or not text.strip():
         return _ALLOW_VERDICT
     try:

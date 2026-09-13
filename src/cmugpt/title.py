@@ -5,12 +5,12 @@ agent turn, so it must stay cheap.
 """
 
 import logging
-import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .llm import api_key, chat_model
 from .moderation import ALLOW, moderate_text
+from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ _SYSTEM_PROMPT = (
 
 
 def _title_model_name() -> str:
-    return os.getenv("TITLE_MODEL", "qwen/qwen3.7-flash")
+    return get_settings().title_model
 
 
 def _clean(raw: str) -> str | None:

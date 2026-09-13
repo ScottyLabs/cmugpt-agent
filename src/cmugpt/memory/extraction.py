@@ -1,13 +1,13 @@
-"""Background learning: distill durable facts from a finished exchange.
+"""Background extraction of durable facts from a completed exchange.
 
-Runs off the response path, rate limited per user, and never stores raw
-chat turns. Only facts the extractor returns are written, through add_fact.
+Runs after the response is sent, is rate limited per user, and writes only
+the facts the extractor model returns, through add_fact. Raw chat turns are
+never stored.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections import deque
 
@@ -16,6 +16,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.store.base import BaseStore
 
 from ..llm import chat_model
+from ..settings import get_settings
 from .facts import add_fact
 from .store import FACTS, item_text, search
 
@@ -71,7 +72,7 @@ def _learn_allowed(user_id: str, *, now: float | None = None) -> bool:
 
 
 def _extraction_model_name() -> str:
-    return os.getenv("MEMORY_EXTRACTION_MODEL", "qwen/qwen3.7-flash")
+    return get_settings().memory_extraction_model
 
 
 def _extractor_model() -> ChatOpenAI:
