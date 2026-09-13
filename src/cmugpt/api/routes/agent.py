@@ -1,33 +1,17 @@
+"""Chat endpoints: the complete reply, the streamed reply, and chat titles."""
+
 import json
 import logging
-import os
-import secrets
-import time
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Literal
+from typing import Any
 
-import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
 from cmugpt import UserInput, run_agent, stream_agent_response
-from cmugpt.graph import drain_background_tasks
-from cmugpt.memory import (
-    clear_memory,
-    close_store,
-    delete_memory_item,
-    ensure_store,
-    is_valid_user_id,
-    list_memory_items,
-    setup_store,
-    store_is_ready,
-    store_status,
-)
+from cmugpt.memory import is_valid_user_id
 from cmugpt.moderation import (
     ALLOW,
     blocked_input_response,
@@ -37,12 +21,11 @@ from cmugpt.moderation import (
 from cmugpt.title import generate_chat_title
 from cmugpt.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
 
+from ..deps import reject_oversized_body, require_shared_secret
+
 logger = logging.getLogger(__name__)
 
-# Request bodies are rejected by header before parsing. Uvicorn imposes
-# no default body limit, so oversized input is both a cost and an abuse
-# vector.
-_MAX_BODY_BYTES = 256 * 1024
+router = APIRouter(prefix="/agent", dependencies=[Depends(require_shared_secret)])
 
 # Upper bounds on request input. Query and history text is sent to the
 # model, where longer input costs more tokens, and user_id becomes each
@@ -52,117 +35,6 @@ _MAX_USER_ID_CHARS = 128
 _MAX_HISTORY_MESSAGES = 40
 _MAX_HISTORY_ITEMS = 200
 _MAX_HISTORY_MESSAGE_CHARS = 8_000
-_PRODUCTION_ENV_NAMES = ("AGENT_ENV", "APP_ENV", "ENVIRONMENT", "SECRETSPEC_PROFILE")
-_PRODUCTION_ENV_VALUES = {"prod", "production"}
-
-
-def _is_production() -> bool:
-    return any(
-        os.getenv(name, "").strip().lower() in _PRODUCTION_ENV_VALUES
-        for name in _PRODUCTION_ENV_NAMES
-    )
-
-
-def _validate_runtime_configuration() -> None:
-    """Refuse to start a production deployment without a database or a shared
-    secret. Starting anyway would run without durable memory or auth."""
-    if not _is_production():
-        return
-    missing = [
-        name
-        for name in ("DATABASE_URL", "AGENT_SHARED_SECRET")
-        if not os.getenv(name, "").strip()
-    ]
-    if missing:
-        raise RuntimeError(
-            "Production configuration is missing required environment "
-            f"variable(s): {', '.join(missing)}. Refusing to start with "
-            "non-durable or unauthenticated user memory."
-        )
-    secret = os.environ["AGENT_SHARED_SECRET"]
-    if secret != secret.strip():
-        raise RuntimeError(
-            "AGENT_SHARED_SECRET cannot have leading or trailing whitespace."
-        )
-    if len(secret) < 32:
-        raise RuntimeError(
-            "AGENT_SHARED_SECRET must be at least 32 characters in production."
-        )
-
-
-@asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Open the memory store when the app starts. On shutdown, wait for any
-    background memory writes to finish, then close the store."""
-    _validate_runtime_configuration()
-    if not os.getenv("AGENT_SHARED_SECRET"):
-        logger.warning(
-            "AGENT_SHARED_SECRET is not set: /agent/respond* and /memory/* "
-            "are UNAUTHENTICATED. This is only acceptable in local dev."
-        )
-    await setup_store()
-    try:
-        yield
-    finally:
-        await drain_background_tasks()
-        await close_store()
-
-
-app = FastAPI(lifespan=_lifespan)
-
-# CORS only governs browser JS calling this API from another origin. It does
-# nothing against direct (curl/script/server) requests, which is why
-# AGENT_SHARED_SECRET below is the actual access boundary. This just stops a
-# malicious page from riding a visitor's browser to hit the API client-side.
-_allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "https://cmugpt.com").split(",")
-    if origin.strip()
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
-)
-
-# Optional shared-secret authentication. When AGENT_SHARED_SECRET is set,
-# /agent/respond* requires a matching bearer token. auto_error=False
-# preserves this module's own error envelope.
-_bearer_scheme = HTTPBearer(auto_error=False)
-
-
-def _require_shared_secret(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
-) -> None:
-    expected = os.getenv("AGENT_SHARED_SECRET")
-    if not expected:
-        return  # Auth is disabled, which only local development should do.
-    token_ok = (
-        creds is not None
-        and creds.scheme.lower() == "bearer"
-        # Compared in constant time. An ordinary `!=` stops at the first
-        # wrong character, and that timing difference can reveal the secret
-        # one prefix at a time.
-        and secrets.compare_digest(
-            creds.credentials.encode("utf-8"), expected.encode("utf-8")
-        )
-    )
-    if not token_ok:
-        raise HTTPException(
-            status_code=HTTPStatus.UNAUTHORIZED,
-            detail="Invalid or missing bearer token.",
-        )
-
-
-@app.exception_handler(HTTPException)
-async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    """Emit both `error` and `detail` so older and newer clients both work."""
-    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": detail, "detail": detail},
-    )
 
 
 def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -307,20 +179,6 @@ def _parse_request(
     )
 
 
-_READY_TTL_SECONDS = 5.0
-_ready_cache: tuple[float, bool] | None = None
-
-
-def _reject_oversized_body(request: Request) -> None:
-    """Reject oversized bodies by header before request.json() parses them."""
-    length = request.headers.get("content-length")
-    if length is not None and length.isdigit() and int(length) > _MAX_BODY_BYTES:
-        raise HTTPException(
-            status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Request body must be at most {_MAX_BODY_BYTES} bytes.",
-        )
-
-
 def _enforce_daily_token_limit(user_input: UserInput) -> None:
     """Reject with 429 once the user's daily budget is exhausted.
 
@@ -337,29 +195,9 @@ def _enforce_daily_token_limit(user_input: UserInput) -> None:
         ) from exc
 
 
-@app.get("/api/health")
-async def health() -> JSONResponse:
-    # The memory block reports which backend this deployment is using and
-    # whether it is answering queries. The readiness probe runs a real store
-    # query, so the result is cached briefly to keep this unauthenticated
-    # endpoint from generating database load.
-    global _ready_cache
-    now = time.monotonic()
-    if _ready_cache is not None and now - _ready_cache[0] < _READY_TTL_SECONDS:
-        ready = _ready_cache[1]
-    else:
-        ready = await store_is_ready()
-        _ready_cache = (now, ready)
-    memory = {**store_status(), "ready": ready}
-    return JSONResponse(
-        content={"status": "ok" if ready else "degraded", "memory": memory},
-        status_code=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
-    )
-
-
-@app.post("/agent/respond", dependencies=[Depends(_require_shared_secret)])
+@router.post("/respond")
 async def agent_respond(request: Request) -> JSONResponse:
-    _reject_oversized_body(request)
+    reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -414,7 +252,7 @@ async def agent_respond(request: Request) -> JSONResponse:
     )
 
 
-@app.post("/agent/title", dependencies=[Depends(_require_shared_secret)])
+@router.post("/title")
 async def agent_title(request: Request) -> JSONResponse:
     """Generate a short chat title from the chat's first user message.
 
@@ -444,10 +282,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-@app.post(
-    "/agent/respond/stream",
-    dependencies=[Depends(_require_shared_secret)],
-)
+@router.post("/respond/stream")
 async def agent_respond_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events endpoint.
 
@@ -459,7 +294,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         event: done   data: <full AgentResponse JSON>
         event: error  data: {"error": "...", "detail": "..."}
     """
-    _reject_oversized_body(request)
+    reject_oversized_body(request)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -532,94 +367,3 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
-
-
-def _require_valid_user_id(user_id: str) -> None:
-    """Reject path-param user ids that are unsafe as a memory namespace key."""
-    if not is_valid_user_id(user_id):
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="Invalid 'user_id'.",
-        )
-
-
-@app.get("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
-async def get_memory(
-    user_id: str,
-    q: Annotated[str | None, Query(max_length=200)] = None,
-    kind: Literal["learned", "remembered"] | None = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 200,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> JSONResponse:
-    """Search a user's learned and explicitly remembered facts."""
-    _require_valid_user_id(user_id)
-    store = await ensure_store()
-    items, total = await list_memory_items(
-        store,
-        user_id,
-        query=q,
-        memory_type=kind,
-        limit=limit,
-        offset=offset,
-    )
-    return JSONResponse(
-        content={
-            "user_id": user_id,
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        },
-        status_code=HTTPStatus.OK,
-    )
-
-
-@app.delete(
-    "/memory/{user_id}/items/{kind}/{item_id}",
-    dependencies=[Depends(_require_shared_secret)],
-)
-async def delete_typed_memory_item(
-    user_id: str,
-    kind: Literal["learned", "remembered"],
-    item_id: str,
-) -> JSONResponse:
-    """Delete one learned or explicitly remembered fact."""
-    _require_valid_user_id(user_id)
-    store = await ensure_store()
-    deleted = await delete_memory_item(store, user_id, kind, item_id)
-    if not deleted:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail="Memory item not found.",
-        )
-    return JSONResponse(
-        content={"status": "deleted", "id": item_id, "type": kind},
-        status_code=HTTPStatus.OK,
-    )
-
-
-@app.delete("/memory/{user_id}", dependencies=[Depends(_require_shared_secret)])
-async def clear_user_memory(user_id: str) -> JSONResponse:
-    """Delete all user memory, including any legacy raw-chat snippets."""
-    _require_valid_user_id(user_id)
-    store = await ensure_store()
-    removed = await clear_memory(store, user_id)
-    return JSONResponse(
-        content={"status": "cleared", "removed": removed},
-        status_code=HTTPStatus.OK,
-    )
-
-
-def main() -> None:
-    # Uvicorn configures only its own loggers. Configure the root logger so
-    # the application's cmugpt.* loggers emit too.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    port = int(os.environ.get("PORT", "5000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-if __name__ == "__main__":
-    main()

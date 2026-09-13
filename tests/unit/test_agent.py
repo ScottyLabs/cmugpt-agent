@@ -16,9 +16,10 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
 
-from cmugpt import api as app_module
 from cmugpt import graph as graph_module
 from cmugpt import planning
+from cmugpt.api import server as app_module
+from cmugpt.api.routes import agent as agent_routes
 from cmugpt.mcp_tools import disabled_group_labels, filter_tools, tool_group
 from cmugpt.prompts import build_system_prompt
 from cmugpt.schema import ActionType, AgentResponse, Thought, UserInput
@@ -80,7 +81,7 @@ def _no_shared_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    with patch.object(app_module, "run_agent", fake_run_agent):
+    with patch.object(agent_routes, "run_agent", fake_run_agent):
         yield TestClient(app_module.app)
 
 
