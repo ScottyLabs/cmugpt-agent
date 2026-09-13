@@ -1,14 +1,13 @@
-"""Deterministic, framework-agnostic guards and metadata computation.
+"""Deterministic output guards and metadata computation.
 
-The system prompt can only request compliance. These helpers enforce it,
-making leaks and false disclosures impossible regardless of what the model
-generates. None of them invoke an LLM, so they add no input tokens and
-remain directly unit-testable.
+The system prompt can only ask the model to comply. These helpers enforce
+the rules on the model's output, so a leak or a false tool disclosure is
+caught whatever the model wrote. None of them call an LLM, so they add no
+input tokens and test without fakes.
 
-This module provides tool-transparency repair, deterministic `thought`
-computation, secret and prompt-leak scrubbing of outgoing text, a streaming
-holdback scrubber, and a zero-token fast path for flagrant injection
-attempts.
+The module covers tool-transparency repair, `thought` computation, secret
+and prompt-leak scrubbing of outgoing text, a streaming holdback scrubber,
+and a zero-token fast path for flagrant injection attempts.
 """
 
 import os
@@ -74,8 +73,8 @@ NEGATIVE_TOOL_CLAIM_PATTERNS = [
     ),
 ]
 
-# Heuristic markers indicating the assistant declined or redirected. Used
-# only to calibrate confidence. Refusal correctness is enforced elsewhere.
+# Phrases that suggest the assistant declined or redirected. They only
+# calibrate confidence and never decide whether to refuse.
 REFUSAL_MARKERS = (
     "can't help",
     "cannot help",
@@ -137,7 +136,7 @@ def apply_tool_transparency_guard(
     messages: list[dict[str, Any]],
     services_used: list[str],
 ) -> AgentResponse:
-    """Keep user-facing tool disclosure consistent with authoritative metadata."""
+    """Keep the answer's tool disclosure consistent with the tools that ran."""
     if not services_used:
         return parsed
 
@@ -175,23 +174,23 @@ _SECRET_ENV_NAMES = (
     "DATABASE_URL",
 )
 
-# Values overlapping these public URLs are exempt from redaction, which
-# would otherwise corrupt every legitimate map link.
+# The scrubber skips secret values that overlap these public URLs, since
+# redacting them would corrupt every legitimate map link.
 _PUBLIC_URL_PREFIXES = ("https://maps.scottylabs.org",)
 
-# Unset or very short values are skipped, since substituting them would
-# corrupt ordinary text.
+# It also skips unset or very short values, since substituting those
+# would corrupt ordinary text.
 _MIN_SECRET_CHARS = 8
 
 _OPENROUTER_KEY_RE = re.compile(r"sk-or(?:-v1)?-[A-Za-z0-9]{20,}")
 
-# Only high-entropy bearer tokens are redacted, so code-help answers
-# containing placeholder tokens are preserved.
+# Only high-entropy bearer tokens are redacted, so a code-help answer can
+# still show a placeholder token.
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{30,})")
 
-# A leak is defined as an 80-character normalized window of the answer
-# occurring verbatim in the prompt. The stride reduces the number of scans at
-# the cost of a marginally higher effective detection threshold.
+# A leak is any 80-character window of the normalized answer that appears
+# verbatim in the prompt. The stride cuts the number of scans and raises
+# the effective detection threshold slightly.
 _LEAK_WINDOW = 80
 _LEAK_SCAN_STEP = 8
 
@@ -209,8 +208,8 @@ def _secret_values() -> list[str]:
         if any(value in public for public in _PUBLIC_URL_PREFIXES):
             continue
         values.append(value)
-        # Transport errors frequently expose only the host, so the netloc of
-        # URL-shaped secrets is redacted as well.
+        # A transport error often names only the host, so the netloc of a
+        # URL-shaped secret is redacted on its own as well.
         if "://" in value:
             netloc = urlparse(value).netloc
             if len(netloc) >= _MIN_SECRET_CHARS and not any(
@@ -248,8 +247,8 @@ def _redact_bearer_match(match: re.Match[str]) -> str:
     token = match.group(1)
     has_lower = any(c.islower() for c in token)
     has_digit = any(c.isdigit() for c in token)
-    # Genuine tokens combine lowercase letters and digits. Placeholders such
-    # as YOUR_TOKEN_HERE do not.
+    # Real tokens mix lowercase letters and digits. Placeholders such as
+    # YOUR_TOKEN_HERE do not.
     if has_lower and has_digit:
         return match.group(0).replace(token, _REDACTION)
     return match.group(0)
@@ -298,8 +297,8 @@ class StreamScrubber:
     An emitted delta cannot be retracted, so the stream trails the model by a
     fixed tail. Any leak detectable within the scan window therefore remains
     unemitted at the moment of detection. Once tripped, nothing further is
-    emitted and postprocess supplies the refusal in the authoritative `done`
-    payload.
+    emitted and postprocess supplies the refusal in the `done` payload, which
+    is what the Surface persists.
     """
 
     # Exceeds the leak window so that a detected window is always still held.
@@ -371,8 +370,8 @@ INJECTION_FAST_PATH_RE = re.compile(
 def is_flagrant_injection(query: str) -> bool:
     """True only for unambiguous jailbreak phrasing warranting a canned refusal.
 
-    This is a cost optimization rather than the defense itself. The prompt
-    rules and the output guard cover everything these signatures miss.
+    This is a cost optimization. The prompt rules and the output guard are the
+    defense and cover everything these signatures miss.
     """
     return bool(INJECTION_FAST_PATH_RE.search(query or ""))
 
@@ -400,10 +399,10 @@ def compute_thought(
 ) -> Thought:
     """Derive confidence and reasoning deterministically from answer context.
 
-    Replaces the model's former self-reported `thought`, following the
-    calibration rubric stated in the system prompt:
+    The model never reports its own confidence. This follows the calibration
+    rubric stated in the system prompt:
 
-    * 0.9+  : an authoritative tool returned data this turn
+    * 0.9+  : a tool returned data this turn
     * 0.6-0.8: partial tool data, or solid training knowledge
     * 0.2-0.4: declining / unable to answer
     """

@@ -19,7 +19,8 @@ from ..llm import chat_model
 from .facts import add_fact
 from .store import FACTS, item_text, search
 
-# Budget for the background learn() pass, which costs one extraction LLM
+# Budget for the background learn() pass. Each run costs one extraction
+# model call.
 LEARN_MIN_INTERVAL_SECONDS = 2.0
 LEARN_MAX_PER_HOUR = 60
 
@@ -49,7 +50,8 @@ _learn_history: dict[str, deque[float]] = {}
 def _learn_allowed(user_id: str, *, now: float | None = None) -> bool:
     """Per-user budget: minimum gap between runs plus an hourly ceiling."""
     current = time.monotonic() if now is None else now
-    if len(_learn_history) > 10_000:  # bound in-process bookkeeping
+    # Drop idle users so a long-lived process cannot grow the dict forever.
+    if len(_learn_history) > 10_000:
         stale = [
             uid
             for uid, times in _learn_history.items()

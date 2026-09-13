@@ -197,12 +197,12 @@ async def prepare_tools_and_store(
             )
         )
     if maps_enabled:
-        # Deliberately outside the data-tools gate: the map is the model's
-        # decision, so the tool must always be in its hands, keyword gating
-        # here would decide navigation before the model can. Local tool, so
-        # it costs no MCP discovery; the price is the catalog section on
-        # every turn. Postprocess still validates every proposal and query
-        # inference remains only a fallback.
+        # Bound outside the data-tools gate on purpose: the map is the model's
+        # decision, so the tool must always be in its hands. Keyword gating here
+        # would decide navigation before the model could. The tool is local, so
+        # it costs no MCP discovery. The price is the catalog section on every
+        # turn. Postprocess still validates every proposal, and query inference
+        # remains only a fallback.
         tools.append(build_show_map_tool())
 
     store: BaseStore | None = None

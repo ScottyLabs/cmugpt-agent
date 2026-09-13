@@ -56,7 +56,8 @@ async def _enforce_cap(
     store: BaseStore, namespace: tuple[str, str], max_items: int
 ) -> None:
     """Evict items past ``max_items``. Scan amortized per CAP_CHECK_EVERY."""
-    if len(_write_counters) > 10_000:  # bound in-process bookkeeping
+    # Cap the counter dict so a long-lived process cannot grow it forever.
+    if len(_write_counters) > 10_000:
         _write_counters.clear()
     count = _write_counters.get(namespace, 0) + 1
     _write_counters[namespace] = count

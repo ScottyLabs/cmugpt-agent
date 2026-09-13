@@ -1,9 +1,9 @@
-"""Offline tests for persistent user memory (agent/memory.py).
+"""Offline tests for persistent user memory (cmugpt.memory).
 
 These run with no database and no network: an ``InMemoryStore`` backs the store
 and a deterministic bag-of-words embedding stands in for OpenAI, so semantic
 search, dedup, and forget behave deterministically. The live extraction pass
-(``learn``) calls an LLM and is exercised by the manual E2E scripts instead.
+(``learn``) calls an LLM and is covered by the scripts in tests/live instead.
 """
 
 import re
@@ -75,9 +75,7 @@ async def test_recall_roundtrip_and_isolation() -> None:
 async def test_dedup_skips_duplicates() -> None:
     store = _indexed_store()
     first, first_status = await memory.add_fact(store, "u1", "Lives in Morewood")
-    dup, dup_status = await memory.add_fact(
-        store, "u1", "lives in morewood"
-    )  # case variant
+    dup, dup_status = await memory.add_fact(store, "u1", "lives in morewood")
     assert_true(first is not None, "first fact stored")
     assert_equal(first_status, "saved", "first fact reports saved")
     assert_equal(dup, first, "duplicate collapses onto the existing fact")
@@ -107,7 +105,7 @@ async def test_explicit_save_promotes_learned_duplicate() -> None:
     remembered_id, promote_status = await memory.add_fact(
         store,
         "u1",
-        "prefers QUIET study spaces",  # user's restated wording
+        "prefers QUIET study spaces",  # The user's restated wording.
         source="tool",
     )
     assert_equal(
@@ -278,7 +276,7 @@ async def test_user_id_wildcard_cannot_cross_read() -> None:
 
 
 async def test_recall_without_index_degrades() -> None:
-    store = InMemoryStore()  # no embeddings - recency fallback
+    store = InMemoryStore()  # No embeddings, so recall falls back to recency.
     await memory.add_fact(store, "u1", "Plays club soccer on weekends")
     block = await memory.recall(store, "u1", "hobbies")
     assert_true("club soccer" in block, "recall works without an index")
@@ -393,7 +391,7 @@ async def test_clear_memory_beyond_one_page() -> None:
 
 
 async def test_forget_keyword_fallback_without_index() -> None:
-    store = InMemoryStore()  # no embeddings
+    store = InMemoryStore()  # No embeddings, so forget uses keyword overlap.
     await memory.add_fact(store, "u1", "Allergic to peanuts")
     await memory.add_fact(store, "u1", "Prefers window seats")
 
@@ -411,7 +409,7 @@ async def test_growth_caps_prune_oldest() -> None:
     original_facts = memory.facts.MAX_FACTS
     original_every = memory.facts.CAP_CHECK_EVERY
     memory.facts.MAX_FACTS = 3
-    memory.facts.CAP_CHECK_EVERY = 1  # cap checks are amortized; force every write
+    memory.facts.CAP_CHECK_EVERY = 1  # Amortized cap check, forced on every write.
     try:
         store = _indexed_store()
         for i in range(5):
@@ -481,7 +479,7 @@ def test_learn_rate_limit() -> None:
             "run after the minimum interval is allowed",
         )
 
-        allowed = 2  # the two successful runs above
+        allowed = 2  # The two runs above that were allowed.
         now = 30.0
         for _ in range(200):
             now += memory.extraction.LEARN_MIN_INTERVAL_SECONDS

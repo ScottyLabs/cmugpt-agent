@@ -5,8 +5,7 @@ the map attached to an answer, since the model reads phrasing and history no
 pattern list can. This module is the deterministic layer around that decision.
 It validates the model's codes against the catalog, builds the URL, and falls
 back to regex inference over the latest query when the tool was not called.
-The logic is framework-free and makes no LLM calls, so it remains
-unit-testable under any model.
+The logic makes no LLM calls, so the tests need no model.
 """
 
 import re
@@ -46,8 +45,8 @@ PAREN_LOCATION_RE = re.compile(
 
 # The routing tool can fail while a valid map is still attached, so the model
 # truthfully reports the error even though the user can see the route. These
-# claims must be stripped, which requires matching how a model describes a
-# dead tool ("not able to get", "didn't return a usable route"), not only a
+# claims must be stripped, which means matching how a model describes a dead
+# tool ("not able to get", "didn't return a usable route") as well as a
 # failed lookup.
 _MAP_FAILURE_VERBS = (
     r"wasn['\u2019]?t\s+able|was\s+not\s+able|not\s+able|"
@@ -199,9 +198,9 @@ def _bare_location_query(query: str) -> tuple[str, str | None] | None:
 
     The intent gate requires a verb, so a bare building name never reaches
     the target patterns, yet a message consisting solely of a building name
-    is a request to see it. Absent the verb, safety instead demands that the
-    entire cleaned message equal one alias exactly. A location embedded in a
-    longer sentence still requires explicit intent.
+    is a request to see it. Without the verb, the whole cleaned message must
+    equal one alias exactly. A location embedded in a longer sentence still
+    requires explicit intent.
     """
     cleaned = _FILLER_RE.sub("", _clean_location_phrase(query))
     cleaned = _ROOM_SUFFIX_RE.sub("", cleaned).strip()
@@ -310,8 +309,8 @@ def _maps_from_show_map(call: dict[str, Any]) -> CmuMaps | None:
 
     The tool schema constrains codes, but these arguments are raw model
     output recorded before validation, so catalog membership is rechecked
-    here. A hallucinated code degrades to fallback inference rather than
-    producing a URL the map would reject.
+    here. A hallucinated code falls back to query inference, so the map never
+    receives a URL it would reject.
     """
     if call.get("name") != SHOW_MAP_TOOL_NAME:
         return None
@@ -339,7 +338,7 @@ def _infer_cmu_maps(
         if decided:
             return decided
 
-    # When the show-map tool was bound this turn, not calling it IS the
+    # When the show-map tool was bound this turn, not calling it is itself the
     # model's decision, so the pattern fallbacks below must not outvote it
     # (they would map a bare "hi" to the HI building). They remain only for
     # turns where the model never had the tool.
@@ -403,8 +402,7 @@ def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
     """Minimal, route-specific pointer to the map.
 
     A fallback only, used when the model wrongly claims a place could not be
-    found even though a map exists. Names the requested locations rather than
-    any hardcoded route.
+    found even though a map exists. It names the locations the user asked for.
     """
     if cmu_maps.mode == "directions":
         src = cmu_maps.src_label or cmu_maps.src or "your starting point"
@@ -421,8 +419,8 @@ def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
     return f"Here's **{target}** on CMU Maps."
 
 
-# Sentence boundary for scrubbing. Splitting by line first ensures markdown
-# headings and list items are already isolated.
+# Sentence boundary for scrubbing. Splitting by line first keeps markdown
+# headings and list items isolated.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 # A leading list marker or heading belongs to the line as a whole, so it is
@@ -512,11 +510,10 @@ def _apply_cmu_maps_guard(
     inferred = _infer_cmu_maps(messages, tool_invocations, model_decides=model_decides)
     if inferred.url:
         parsed.cmu_maps = inferred
-        # The validated map is authoritative. If the text still claims the
-        # lookup failed, repair it so the user never sees the contradiction.
-        # A model that names a place absent from the catalog can still invent
-        # a failure claim, so this guard remains a backstop even now that raw
-        # tool errors no longer reach the model.
+        # The validated map wins over the text. If the text still claims the
+        # lookup failed, repair it so the user never sees the contradiction. Raw
+        # tool errors never reach the model, but a model that names a place absent
+        # from the catalog can still invent a failure claim, so this backstop stays.
         if MAP_FAILURE_CLAIM_RE.search(parsed.response_text or ""):
             parsed.response_text = _repair_false_map_failure(
                 parsed.response_text or "", inferred

@@ -122,7 +122,7 @@ def _build_index(
 
     for code, name in code_to_name.items():
         normalized = normalize(name)
-        add(normalized, code)  # full name
+        add(normalized, code)
         if len(code) >= 3:
             # Two-character codes collide with ordinary words, so only longer
             # codes register as their own alias.
@@ -132,7 +132,7 @@ def _build_index(
         while len(stripped) > 1 and stripped[-1] in _GENERIC_SUFFIX:
             stripped = stripped[:-1]
         if stripped != words:
-            add(" ".join(stripped), code)  # name minus its generic suffix
+            add(" ".join(stripped), code)
         for token in words:
             if token not in _STOPWORDS and len(token) >= 3:
                 single_word_to_codes.setdefault(token, set()).add(code)
@@ -178,8 +178,8 @@ def load_location_index() -> tuple[tuple[tuple[str, str, str], ...], dict[str, s
 _known, LOCATION_ID_TO_LABEL = load_location_index()
 KNOWN_CMU_LOCATIONS: list[tuple[str, str, str]] = list(_known)
 
-# Curated nicknames exported for the system prompt. The model resolves what
-# users say, so it must be informed of slang the formal names do not carry.
+# Curated nicknames, exported for the system prompt. The model resolves what
+# users say, so it needs the slang the formal names do not carry.
 CURATED_NICKNAMES: list[tuple[str, str]] = sorted(
     (alias, code) for alias, code in _EXTRA_ALIASES.items()
 )

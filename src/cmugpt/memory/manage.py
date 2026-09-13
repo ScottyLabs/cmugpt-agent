@@ -1,7 +1,8 @@
 """The management API behind the Surface's memory manager.
 
-Lists, deletes, and clears a user's facts. Search here is a literal substring
-match, not semantic, so results are predictable and typing costs nothing.
+Lists, deletes, and clears a user's facts. Search here is a literal
+substring match, so results are predictable and each keystroke costs no
+embedding call.
 """
 
 from __future__ import annotations
@@ -57,8 +58,8 @@ async def list_memory_items(
 ) -> tuple[list[dict[str, Any]], int]:
     """List learned and remembered facts with literal substring search.
 
-    Deliberately not semantic: predictable for users and free of per-keystroke
-    embedding cost.
+    Literal on purpose: results are predictable and each keystroke costs no
+    embedding call.
     """
     if not is_valid_user_id(user_id):
         return [], 0

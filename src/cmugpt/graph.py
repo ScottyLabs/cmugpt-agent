@@ -1,23 +1,22 @@
-"""LangGraph implementation of the Bark agent.
+"""The LangGraph control flow of the Bark agent.
 
-A single compiled `StateGraph` is the one source of truth for both the
-non-streaming (`/agent/respond`) and streaming (`/agent/respond/stream`) HTTP
-endpoints. The model emits plain Markdown and proposes the campus map by
-calling the local maps_show_map tool. Deterministic nodes validate that
-proposal, fall back to query inference, and compute cmu_maps, services_used,
-and thought into graph state.
+One compiled `StateGraph` serves both HTTP endpoints, `/agent/respond` and
+`/agent/respond/stream`. The model writes plain Markdown and proposes the
+campus map by calling the local maps_show_map tool. Deterministic nodes
+validate that proposal, fall back to query inference, and write cmu_maps,
+services_used, and thought into graph state.
 
-Graph shape: ``START -> recall -> agent``. From ``agent`` either
-``-> tools -> agent`` (when the model requested tool calls) or
-``-> postprocess -> END`` (final answer). ``postprocess`` also schedules the
-background memory-learn task before emitting ``done``, so a client disconnect
-right after the final event cannot cancel it.
+Graph shape: ``START -> recall -> agent``. From ``agent`` the run goes
+``-> tools -> agent`` when the model requested tool calls, or
+``-> postprocess -> END`` for the final answer. ``postprocess`` schedules
+the background memory-learn task before it emits ``done``, so a client that
+disconnects right after the final event cannot cancel it.
 
 Streaming uses LangGraph's custom stream channel. Nodes emit typed events
-through the injected `writer` and the public entrypoints forward them as
-``(event_name, data)`` tuples matching the existing SSE contract
-(``status`` / ``map`` / ``delta`` / ``done`` / ``error``). A non-streaming
-``ainvoke`` run simply drops the writes.
+through the injected `writer`, and the public entry points forward them as
+``(event_name, data)`` tuples matching the SSE contract (``status``,
+``map``, ``delta``, ``done``, ``error``). A non-streaming ``ainvoke`` run
+drops the writes.
 """
 
 from __future__ import annotations
@@ -83,15 +82,15 @@ logger = logging.getLogger(__name__)
 StreamEvent = tuple[str, dict[str, Any]]
 
 
-# Safety limits rather than tuning parameters. The values are set high
-# enough that ordinary conversations never reach them, so they engage only
-# on anomalous input.
+# Safety limits. Each is set high enough that ordinary conversations never
+# reach it, so there is nothing here to tune: a limit engages only on
+# anomalous input.
 
 # Tool results are resent on every subsequent pass. Twelve thousand
-# characters accommodates every current CMU tool result, including the 9k
-# full dining list, so the cap engages only if a tool begins returning
-# substantially more. The marker prevents the model from presenting a
-# truncated list as complete.
+# characters covers every current CMU tool result, including the 9k full
+# dining list, so the cap engages only if a tool starts returning much
+# more. The marker prevents the model from presenting a truncated list as
+# complete.
 _TOOL_RESULT_MAX_CHARS = 12_000
 _TOOL_RESULT_TRUNCATION_MARKER = (
     "\n[Result truncated. More entries exist beyond this point.]"
@@ -114,7 +113,7 @@ class AgentState(TypedDict):
     # Tool groups the user switched off in the Surface. Their tools are
     # already unbound. Postprocess reads this to keep the map embed off too.
     disabled_tools: list[str]
-    # Completed tool rounds. Drives the unbound later passes.
+    # Completed tool rounds. Only the pass-usage log line reads it.
     tool_rounds: Annotated[int, operator.add]
     # Persists across passes so that a subsequent clean pass cannot clear a
     # detection.
@@ -186,8 +185,7 @@ def _record_pass_usage(state: AgentState, gathered: AIMessageChunk) -> None:
 
     Falls back to a characters/4 estimate so the budget remains enforceable
     when the stream carries no usage metadata. The log line is what allows
-    the caps and thresholds to be tuned from production data rather than
-    estimated.
+    the caps and thresholds to be tuned from production data.
     """
     usage = getattr(gathered, "usage_metadata", None) or {}
     estimated = not usage.get("total_tokens")
@@ -252,10 +250,11 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
             base, *rest = call_messages
             call_messages = [base, SystemMessage(content=memory_block), *rest]
 
-        # Buffer (don't live-stream) passes whose text postprocess may repair:
-        # forced tool passes (preamble prose is not the final answer) and map
-        # queries (false "couldn't look up" claims get stripped). With CMUMaps
-        # off there is no map to contradict, so map queries stream normally.
+        # Buffer, instead of live-streaming, the passes whose text postprocess
+        # may repair: forced tool passes (the preamble is not the final answer)
+        # and map queries (false "couldn't look up" claims get stripped). With
+        # CMUMaps off there is no map to contradict, so map queries stream
+        # normally.
         suppress_stream = force_tool or (maps_enabled and query_has_map_intent(query))
 
         # Live deltas cannot be retracted, so they trail the scrubber's
@@ -486,9 +485,9 @@ def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
             model_result = (
                 _tool_failure_notice(name, maps_enabled) if failed else result
             )
-            # maps_show_map is presentation rather than a data source. It
-            # remains in tool_invocations for the guard but is excluded from
-            # the services the Surface reports as answer sources.
+            # maps_show_map shows a map and returns no data, so it stays in
+            # tool_invocations for the guard and is left out of the services the
+            # Surface reports as answer sources.
             if (
                 name != SHOW_MAP_TOOL_NAME
                 and name not in state["services_used"]
@@ -541,10 +540,11 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
         metadata=Metadata(),
     )
 
-    # CMUMaps switched off means no map embed either, not just no map tools.
-    # The guard below is what attaches the map to the answer. maps_show_map
-    # is always bound when maps are enabled, so the model has already made
-    # the map decision and the guard must not second-guess it with patterns.
+    # With CMUMaps switched off, the map embed goes too, along with the map
+    # tools. The guard below is what attaches the map to the answer.
+    # maps_show_map is always bound when maps are enabled, so the model has
+    # already made the map decision and the guard must not second-guess it
+    # with patterns.
     if "maps" not in normalize_disabled_groups(state.get("disabled_tools")):
         parsed = _apply_cmu_maps_guard(parsed, msgs, invocations, model_decides=True)
     parsed = apply_tool_transparency_guard(parsed, msgs, services)
@@ -572,10 +572,9 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     if parsed.cmu_maps.url:
         writer({"event": "map", "data": parsed.cmu_maps.model_dump()})
 
-    # The learn task is scheduled BEFORE `done` is emitted. Clients often
-    # disconnect right after the final event, which cancels the graph, and
-    # the task must already exist by then or memories are silently never
-    # learned.
+    # Schedule the learn task before emitting `done`. Clients often disconnect
+    # right after the final event, which cancels the graph, and the task must
+    # already exist by then or memories are silently never learned.
     user_id = state.get("user_id")
     if user_id and parsed.response_text:
         task = asyncio.create_task(_safe_learn(user_id, query, parsed.response_text))

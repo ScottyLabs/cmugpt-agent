@@ -1,8 +1,7 @@
 """CI smoke tests for the Bark agent HTTP surface.
 
-These tests avoid live OpenRouter and MCP calls so the default CI pipeline can
-run without secrets. The existing live E2E scripts can still be run manually
-when those services are configured.
+They make no live OpenRouter or MCP calls, so CI runs without secrets. The
+scripts in tests/live exercise the real services.
 """
 
 import os

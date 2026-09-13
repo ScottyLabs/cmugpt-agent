@@ -21,13 +21,15 @@ from langgraph.store.memory import InMemoryStore
 logger = logging.getLogger(__name__)
 
 FACTS = "facts"
-EPISODES = "episodes"  # legacy cleanup only; new raw chat turns are never stored
+# Raw chat turns from older builds. Nothing writes here anymore. The name is
+# kept so cleanup can still delete what those builds stored.
+EPISODES = "episodes"
 
-# The user_id becomes the key that separates each user's stored memory.
-# LangGraph matches that key as a SQL LIKE pattern without escaping, so the
-# allowlist excludes the pattern wildcards ("%", "_") and the separator
-# ".". A hostile user_id therefore cannot match another user's namespace.
-# Checked at every entry point.
+# The user_id is the key that separates one user's stored memory from
+# another's. LangGraph matches that key as a SQL LIKE pattern without
+# escaping, so the allowlist excludes the wildcards ("%", "_") and the
+# separator ".". A hostile user_id therefore cannot match another user's
+# namespace. Every entry point checks it.
 _USER_ID_RE = re.compile(r"^[A-Za-z0-9@:+=~-]{1,128}$")
 
 
@@ -228,8 +230,9 @@ async def _setup_postgres_store(store: Any, db_url: str) -> None:
     # the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
         try:
-            # Static DDL on purpose (_PG_SCHEMA is this same literal): with
-            # no composition the statement is trivially injection-free.
+            # The schema name is written out here rather than composed from
+            # _PG_SCHEMA, so nothing can be injected into this statement. Keep the
+            # two in sync.
             await conn.execute("CREATE SCHEMA IF NOT EXISTS agent_memory")
         except Exception as exc:
             raise RuntimeError(
@@ -296,8 +299,9 @@ async def search(
     so order-dependent behavior differs between local runs and production.
     """
     if not is_valid_user_id(namespace[0]):
-        # Defense in depth: never build a store query from an unsafe namespace
-        # key (see is_valid_user_id). This is the single chokepoint for reads.
+        # Every caller has already validated the id, but every read passes
+        # through here, so check again and never build a query from an unsafe
+        # key.
         return []
     try:
         if query and has_index(store):

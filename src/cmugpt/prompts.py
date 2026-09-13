@@ -84,9 +84,9 @@ def _directions_section(has_routing_tool: bool, maps_enabled: bool) -> str:
     """Directions guidance conditioned on routing-tool availability.
 
     Without a routing tool the model cannot compute a route and must neither
-    invent steps nor claim a failed lookup, since the attached map is the
-    authoritative source. With CMUMaps disabled there is no map, and none may
-    be promised.
+    invent steps nor claim a failed lookup, since the attached map already
+    shows the route. With CMUMaps disabled there is no map, and none may be
+    promised.
     """
     if not maps_enabled:
         return (
@@ -170,8 +170,8 @@ def _campus_map_section(maps_enabled: bool) -> str:
 def _disabled_tools_section(disabled_tools: Iterable[str] | None) -> str:
     """Name the disabled tool groups, if any.
 
-    The tools are already unbound. This section exists solely so the model
-    can explain why a lookup is unavailable rather than guess at the data.
+    The tools are already unbound. This section exists so the model can say
+    why a lookup is unavailable instead of guessing at the data.
     """
     labels = disabled_group_labels(disabled_tools)
     if not labels:
@@ -201,9 +201,9 @@ def _variable_sections(
     has_maps_tools = any(
         tool_group(tool.name or "") == "maps" for tool in (tools or [])
     )
-    # No bound maps tools without a user disable implies the query is not
-    # map-related, making routing guidance redundant. The disabled-group
-    # warning is always retained when the user disabled the group.
+    # If no maps tools are bound and the user did not disable them, the query
+    # is not map-related and routing guidance would be wasted. The
+    # disabled-group warning always stays when the user disabled the group.
     if maps_enabled and not has_maps_tools:
         directions_section = ""
     else:

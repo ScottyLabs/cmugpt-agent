@@ -64,8 +64,8 @@ def _is_production() -> bool:
 
 
 def _validate_runtime_configuration() -> None:
-    """Refuse to start a production deployment that is missing its database
-    or its shared secret, rather than run without durable memory or auth."""
+    """Refuse to start a production deployment without a database or a shared
+    secret. Starting anyway would run without durable memory or auth."""
     if not _is_production():
         return
     missing = [
@@ -188,8 +188,7 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     # user_id becomes the key that separates one user's stored memory from
     # another's, and the database matches it as a pattern rather than
     # literally. Characters with special meaning there must be excluded, so
-    # is_valid_user_id enforces a strict allowlist rather than accepting any
-    # printable string.
+    # is_valid_user_id enforces a strict allowlist.
     if user_id is not None and not is_valid_user_id(user_id):
         raise ValueError(
             "'user_id' must match [A-Za-z0-9@:+=~-] and be at most "
@@ -207,9 +206,8 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _parse_disabled_tools_value(raw: Any) -> list[str]:
     """Tool groups the Surface reports the user disabled.
 
-    Unknown group ids are dropped by the agent rather than rejected here, so
-    a Surface that gains a new toggle before the agent recognizes it
-    continues to function.
+    Unknown group ids pass through here and the agent drops them, so a
+    Surface that gains a new toggle before the agent knows it keeps working.
     """
     if raw is None:
         return []
@@ -291,8 +289,8 @@ def _parse_request(
             )
         # History is sent to the model as-is, so both the number of turns
         # and the size of each message are capped to keep one request from
-        # carrying an unbounded token cost. Oversized history is trimmed
-        # rather than rejected, matching how context windows truncate.
+        # carrying an unbounded token cost. Oversized history is trimmed, the
+        # way a context window truncates, so the request still succeeds.
         message_history = [
             {
                 "role": str(item["role"]),
@@ -420,8 +418,8 @@ async def agent_respond(request: Request) -> JSONResponse:
 async def agent_title(request: Request) -> JSONResponse:
     """Generate a short chat title from the chat's first user message.
 
-    Returns ``{"title": null}`` rather than an error when generation fails,
-    so the caller can simply keep its placeholder title.
+    Returns ``{"title": null}`` when generation fails, so the caller keeps
+    its placeholder title and never sees an error.
     """
     try:
         payload = await request.json()
@@ -489,7 +487,7 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
 
             # The done payload is held back until the finished reply passes an
             # output check: deltas have already streamed, but done is what the
-            # surface persists and re-renders, so redacting it retroactively
+            # Surface persists and re-renders, so redacting it retroactively
             # scrubs the reply everywhere that outlives the stream.
             final_payload: dict[str, Any] | None = None
             async for event_name, data in stream_agent_response(
@@ -530,7 +528,8 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # disable nginx/proxy buffering
+            # Tell nginx-style proxies to pass events through unbuffered.
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -612,8 +611,8 @@ async def clear_user_memory(user_id: str) -> JSONResponse:
 
 
 def main() -> None:
-    # Uvicorn only configures its own loggers. Configure the root logger so
-    # application logs (agent.*, src.*) actually emit.
+    # Uvicorn configures only its own loggers. Configure the root logger so
+    # the application's cmugpt.* loggers emit too.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

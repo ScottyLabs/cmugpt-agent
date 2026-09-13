@@ -43,7 +43,6 @@ async def test_mcp():
     for tool in tools:
         print(f"  - {tool.name}: {tool.description}")
 
-    # Call the first tool with empty args as a smoke test
     if tools:
         first_tool = tools[0]
         print(f"\nCalling tool '{first_tool.name}' with empty args...")

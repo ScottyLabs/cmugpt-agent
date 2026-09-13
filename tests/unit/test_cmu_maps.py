@@ -1,4 +1,4 @@
-"""Unit tests for deterministic CMU Maps inference in agent/cmu_maps.py.
+"""Unit tests for deterministic CMU Maps inference in cmugpt.maps.inference.
 
 Pure logic tests with no LLM, MCP, or network. Each case pairs a realistic
 query with the map it must produce or the required abstention. Abstentions

@@ -78,9 +78,9 @@ _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
     ),
 }
 
-# Args blocks are retained because parameter conventions are documented only
-# there. The trailing Returns prose and the markdown boilerplate contribute
-# nothing the model requires.
+# Keep the Args block, since parameter conventions live only there. The
+# trailing Returns prose and the markdown boilerplate give the model
+# nothing it needs.
 _RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*")
 _MARKDOWN_BOILERPLATE_RE = re.compile(r"\s*formatted as clean markdown", re.IGNORECASE)
 
@@ -105,8 +105,8 @@ def select_tools_for_query(
     that is campus-related but carries no group signal retains every tool.
     Only when no text anywhere resembles campus data does the fallback
     contract to the guide group, the general category for student-life
-    questions, so that greetings no longer incur the cost of all 23 schemas.
-    Ungrouped tools are always retained.
+    questions, so a greeting does not pay for all 23 schemas. Ungrouped tools
+    are always retained.
     """
     matched = {
         group for group, hint in _GROUP_HINT_RES.items() if hint.search(query or "")
@@ -181,11 +181,11 @@ def filter_tools(
     return [tool for tool in tools if tool_group(tool.name or "") not in groups]
 
 
-# Tool discovery is a network round-trip to the MCP server, so the result is
-# cached rather than paid on every request. The returned tools are
-# self-contained (each invocation opens its own session), which is what makes
-# reuse safe. Failures are cached briefly as well, so an unreachable server is
-# not polled on every request yet service recovers quickly.
+# Tool discovery is a network round trip to the MCP server, so the result
+# is cached. The returned tools are self-contained (each invocation opens
+# its own session), which is what makes reuse safe. Failures are cached
+# briefly too, so an unreachable server is not polled on every request and
+# service still recovers quickly.
 _CACHE_TTL_SECONDS = 60.0
 _FAILURE_TTL_SECONDS = 15.0
 
@@ -227,7 +227,8 @@ async def load_mcp_tools() -> list[BaseTool]:
         return cached[2]
 
     async with _cache_lock:
-        cached = _cache  # re-check: another request may have refreshed it
+        # Re-check under the lock: another request may have refreshed it.
+        cached = _cache
         if cached and cached[0] == url and cached[1] > time.monotonic():
             return cached[2]
         try:
@@ -238,7 +239,7 @@ async def load_mcp_tools() -> list[BaseTool]:
                 tool.description = condense_tool_description(tool.description)
             ttl = _CACHE_TTL_SECONDS
         except Exception:
-            # MCP unavailable: continue without tools rather than fail the turn.
+            # MCP unavailable: the turn continues without tools.
             logger.warning("MCP tool discovery failed for %s", url, exc_info=True)
             tools = []
             ttl = _FAILURE_TTL_SECONDS
