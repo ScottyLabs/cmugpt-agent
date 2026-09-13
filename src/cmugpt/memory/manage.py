@@ -1,8 +1,7 @@
-"""The management API behind the Surface's memory manager.
+"""List, delete, and clear operations behind the Surface's memory manager.
 
-Lists, deletes, and clears a user's facts. Search here is a literal
-substring match, so results are predictable and each keystroke costs no
-embedding call.
+Search is a case-insensitive substring match rather than a semantic query, so
+results are predictable and no embedding is computed per request.
 """
 
 from __future__ import annotations

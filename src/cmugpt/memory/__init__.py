@@ -1,14 +1,14 @@
-"""Persistent, per-user memory across chats.
+"""Per-user memory that persists across chats.
 
-Facts live under the namespace (user_id, "facts"). Raw chat turns are never
-stored, and turns without a user_id run with memory off. Embeddings need
-OPENAI_API_KEY, since OpenRouter has no embeddings API. Without it, recall
-degrades from semantic search to a recency listing.
+Facts are stored under the namespace (user_id, "facts"). Raw chat turns are
+never stored, and turns without a user_id run with memory disabled. Semantic
+search requires OPENAI_API_KEY, since OpenRouter has no embeddings API.
+Without it, recall falls back to recency order.
 
-The public API is re-exported here. Submodules: store (the LangGraph store
-singleton), facts (recall, save, forget), tools (the remember and forget
-tools the model calls), extraction (background learning), and manage (the
-list, delete, and clear endpoints).
+Submodules: store (the process-wide LangGraph store), facts (recall, save,
+forget), tools (the remember and forget tools exposed to the model),
+extraction (background fact extraction), and manage (list, delete, clear).
+The public API is re-exported from this package.
 """
 
 from .extraction import learn

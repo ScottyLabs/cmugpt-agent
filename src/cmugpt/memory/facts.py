@@ -1,8 +1,8 @@
-"""Durable facts about a user: recall, save, and forget.
+"""Recall, save, and forget for a user's durable facts.
 
-Facts live under the namespace (user_id, "facts"). Writes collapse near
-duplicates, forgetting refuses to guess between equally likely matches, and a
-per-user cap keeps scripted growth bounded.
+Facts are stored under (user_id, "facts"). add_fact merges near duplicates,
+forget declines to delete when two stored facts match equally well, and a
+per-user cap bounds growth.
 """
 
 from __future__ import annotations

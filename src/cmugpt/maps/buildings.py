@@ -14,8 +14,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-# buildings.json ships inside this package, so one path serves both the
-# editable checkout and the built wheel.
+# buildings.json is package data, so the same path works in an editable
+# checkout and in the installed wheel.
 _BUILDINGS_PATH = Path(__file__).with_name("buildings.json")
 
 

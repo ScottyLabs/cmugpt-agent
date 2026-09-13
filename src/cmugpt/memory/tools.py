@@ -1,8 +1,9 @@
-"""The remember and forget tools the model can call.
+"""The remember and forget tools exposed to the model.
 
-Both close over one user's id, so a call can never reach another user's
-memory. The graph trusts these tools by the metadata marker set here, never
-by name, because an MCP server could publish its own tool called remember.
+Both are bound to a single user_id at construction, so a call cannot reach
+another user's memory. The graph identifies them by the metadata marker set
+here rather than by name, since an MCP server could publish a tool that is
+also named remember.
 """
 
 from __future__ import annotations

@@ -1,9 +1,9 @@
-"""Decides what one turn pays for before the graph runs.
+"""Per-turn planning that runs before the graph.
 
-Which tool groups to discover and bind, whether the remember and forget tools
-are needed, whether memory recall runs, and how much history is carried. Every
-decision here is a regex or a list slice, never a model call, so a generic
-turn stays cheap and the graph only ever sees the tools it can use.
+Decides which tool groups to discover and bind, whether the remember and
+forget tools are needed, whether memory recall runs, and how much history to
+carry. Every decision is a regex match or a list slice, with no model call,
+so a conversational turn spends no tokens on tool schemas.
 """
 
 from __future__ import annotations
