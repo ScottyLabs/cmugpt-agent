@@ -7,13 +7,14 @@ Each test asserts:
     * services_used is populated when the query requires data
     * schema fields are sane
 
-Run with: `uv run python tests/live/live_agent_e2e.py`
+Run with `uv run pytest evals`. Skipped unless OPENROUTER_API_KEY and
+MCP_SERVER_URL are set, and never part of the default `pytest` run.
 """
 
-import asyncio
 import re
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+import pytest
 
 from cmugpt import run_agent
 from cmugpt.maps.inference import _cmu_maps_success_text, _infer_cmu_maps
@@ -44,21 +45,28 @@ MARKDOWN_PATTERNS = {
 }
 
 
+pytestmark = pytest.mark.live
+
+
 @dataclass
-class TestStats:
+class Recorder:
+    """Prints each check and fails the test at the first check that does not pass."""
+
     passed: int = 0
-    failed: int = 0
-    failures: list[str] = field(default_factory=list)
 
     def record(self, name: str, ok: bool, detail: str = "") -> None:
         if ok:
             self.passed += 1
             print(f"  PASS  {name}")
-        else:
-            self.failed += 1
-            msg = f"{name}{f' - {detail}' if detail else ''}"
-            self.failures.append(msg)
-            print(f"  FAIL  {msg}")
+            return
+        msg = f"{name}{f' - {detail}' if detail else ''}"
+        print(f"  FAIL  {msg}")
+        pytest.fail(msg)
+
+
+@pytest.fixture
+def stats() -> Recorder:
+    return Recorder()
 
 
 def detect_markdown(text: str) -> list[str]:
@@ -71,7 +79,7 @@ def find_stall_phrases(text: str) -> list[str]:
 
 
 def assert_common(
-    stats: TestStats,
+    stats: Recorder,
     label: str,
     response: AgentResponse,
     *,
@@ -141,7 +149,7 @@ def print_response(label: str, response: AgentResponse) -> None:
     print()
 
 
-async def test_single_building(stats: TestStats) -> AgentResponse:
+async def _single_building(stats: Recorder) -> AgentResponse:
     print("\n" + "=" * 70)
     print("TEST 1: Single building query (should call maps tool)")
     print("=" * 70)
@@ -153,7 +161,8 @@ async def test_single_building(stats: TestStats) -> AgentResponse:
     return resp
 
 
-async def test_multi_turn_cafe(stats: TestStats, prior: AgentResponse) -> AgentResponse:
+async def test_multi_turn_cafe(stats: Recorder) -> None:
+    prior = await _single_building(stats)
     print("\n" + "=" * 70)
     print("TEST 2: Multi-turn - closest cafe")
     print("=" * 70)
@@ -170,10 +179,9 @@ async def test_multi_turn_cafe(stats: TestStats, prior: AgentResponse) -> AgentR
     )
     print_response("T2", resp)
     assert_common(stats, "T2", resp)
-    return resp
 
 
-async def test_dining_hours(stats: TestStats) -> None:
+async def test_dining_hours(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 3: Dining hours - should produce structured Markdown")
     print("=" * 70)
@@ -203,7 +211,7 @@ async def test_dining_hours(stats: TestStats) -> None:
         print("  SKIP  [T3] structured-list check (single-item answer)")
 
 
-async def test_listing(stats: TestStats) -> None:
+async def test_listing(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 4: 'List all' query - must use bullets")
     print("=" * 70)
@@ -221,7 +229,7 @@ async def test_listing(stats: TestStats) -> None:
     )
 
 
-async def test_off_topic_general(stats: TestStats) -> None:
+async def test_off_topic_general(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 5: Off-topic general query (CMU-first, but should still answer)")
     print("=" * 70)
@@ -239,7 +247,7 @@ async def test_off_topic_general(stats: TestStats) -> None:
     )
 
 
-async def test_unknown_lookup(stats: TestStats) -> None:
+async def test_unknown_lookup(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 6: Specific lookup - verifies tool is invoked, not stalled")
     print("=" * 70)
@@ -250,7 +258,7 @@ async def test_unknown_lookup(stats: TestStats) -> None:
     assert_common(stats, "T6", resp)
 
 
-async def test_tool_transparency_with_cmu_food(stats: TestStats) -> None:
+async def test_tool_transparency_with_cmu_food(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 7: Tool transparency - CMU food query must disclose tool use")
     print("=" * 70)
@@ -293,7 +301,7 @@ async def test_tool_transparency_with_cmu_food(stats: TestStats) -> None:
     )
 
 
-async def test_cmu_maps_route_aliases(stats: TestStats) -> None:
+async def test_cmu_maps_route_aliases(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 8: CMU Maps route aliases - shorthand directions")
     print("=" * 70)
@@ -341,7 +349,7 @@ async def test_cmu_maps_route_aliases(stats: TestStats) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_jailbreak_instruction_override(stats: TestStats) -> None:
+async def test_jailbreak_instruction_override(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 9: Jailbreak - instruction override")
     print("=" * 70)
@@ -371,7 +379,7 @@ async def test_jailbreak_instruction_override(stats: TestStats) -> None:
     )
 
 
-async def test_jailbreak_prompt_extraction(stats: TestStats) -> None:
+async def test_jailbreak_prompt_extraction(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 10: Jailbreak - system-prompt extraction")
     print("=" * 70)
@@ -403,7 +411,7 @@ async def test_jailbreak_prompt_extraction(stats: TestStats) -> None:
     )
 
 
-async def test_jailbreak_persona_switch(stats: TestStats) -> None:
+async def test_jailbreak_persona_switch(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 11: Jailbreak - DAN-style persona switch")
     print("=" * 70)
@@ -443,7 +451,7 @@ async def test_jailbreak_persona_switch(stats: TestStats) -> None:
     )
 
 
-async def test_format_hijack(stats: TestStats) -> None:
+async def test_format_hijack(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 12: Format hijack - schema must persist")
     print("=" * 70)
@@ -465,7 +473,7 @@ async def test_format_hijack(stats: TestStats) -> None:
     )
 
 
-async def test_pii_probe(stats: TestStats) -> None:
+async def test_pii_probe(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 13: PII probe - must refuse / redirect")
     print("=" * 70)
@@ -512,7 +520,7 @@ async def test_pii_probe(stats: TestStats) -> None:
     )
 
 
-async def test_academic_dishonesty(stats: TestStats) -> None:
+async def test_academic_dishonesty(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 14: Academic dishonesty - refuse exam answer, offer help")
     print("=" * 70)
@@ -545,7 +553,7 @@ async def test_academic_dishonesty(stats: TestStats) -> None:
     )
 
 
-async def test_hallucination_probe(stats: TestStats) -> None:
+async def test_hallucination_probe(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 15: Hallucination probe - should NOT invent precise stats")
     print("=" * 70)
@@ -599,7 +607,7 @@ async def test_hallucination_probe(stats: TestStats) -> None:
     )
 
 
-async def test_history_injection(stats: TestStats) -> None:
+async def test_history_injection(stats: Recorder) -> None:
     print("\n" + "=" * 70)
     print("TEST 16: Prompt-injection via fake assistant history")
     print("=" * 70)
@@ -636,55 +644,3 @@ async def test_history_injection(stats: TestStats) -> None:
         not leaked,
         detail=f"leaked: {leaked}",
     )
-
-
-async def _safe_run(
-    stats: TestStats,
-    label: str,
-    coro,  # noqa: ANN001 - coroutine type annotations are ugly here
-):
-    """Run a test coroutine, catching unhandled exceptions per-test."""
-    try:
-        return await coro
-    except Exception as exc:
-        stats.failed += 1
-        msg = f"{label} unhandled exception: {exc!r}"
-        stats.failures.append(msg)
-        print(f"\n!! {msg}")
-        return None
-
-
-async def main() -> int:
-    stats = TestStats()
-    # Functional tests
-    building = await _safe_run(stats, "T1", test_single_building(stats))
-    if building is not None:
-        await _safe_run(stats, "T2", test_multi_turn_cafe(stats, building))
-    await _safe_run(stats, "T3", test_dining_hours(stats))
-    await _safe_run(stats, "T4", test_listing(stats))
-    await _safe_run(stats, "T5", test_off_topic_general(stats))
-    await _safe_run(stats, "T6", test_unknown_lookup(stats))
-    await _safe_run(stats, "T7", test_tool_transparency_with_cmu_food(stats))
-    await _safe_run(stats, "T8", test_cmu_maps_route_aliases(stats))
-    # Adversarial / safety tests
-    await _safe_run(stats, "T9", test_jailbreak_instruction_override(stats))
-    await _safe_run(stats, "T10", test_jailbreak_prompt_extraction(stats))
-    await _safe_run(stats, "T11", test_jailbreak_persona_switch(stats))
-    await _safe_run(stats, "T12", test_format_hijack(stats))
-    await _safe_run(stats, "T13", test_pii_probe(stats))
-    await _safe_run(stats, "T14", test_academic_dishonesty(stats))
-    await _safe_run(stats, "T15", test_hallucination_probe(stats))
-    await _safe_run(stats, "T16", test_history_injection(stats))
-
-    print("\n" + "=" * 70)
-    print(f"SUMMARY: {stats.passed} passed, {stats.failed} failed")
-    print("=" * 70)
-    if stats.failures:
-        print("Failures:")
-        for f in stats.failures:
-            print(f"  - {f}")
-    return 0 if stats.failed == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))

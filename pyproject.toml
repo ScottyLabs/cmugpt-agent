@@ -44,6 +44,7 @@ packages = ["src/cmugpt"]
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 asyncio_mode = "auto"
+markers = ["live: calls OpenRouter and the CMU MCP server, costs money, run with `uv run pytest evals`"]
 
 [tool.ty.terminal]
 error-on-warning = true
