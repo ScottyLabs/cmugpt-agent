@@ -18,22 +18,31 @@ Bark consists of two services.
   through OpenRouter, validates the result, and streams the answer back to the
   Surface.
 
-Campus data comes from the CMU MCP server, which publishes tools for maps,
-courses, dining, and the student guide over the Model Context Protocol.
-Per-user memory is stored in PostgreSQL with the pgvector extension.
+Campus data comes from the CMU MCP server
+([mcp-server](https://git.cmu.dev/ScottyLabs/mcp-server)), which publishes
+tools for maps, courses, dining, and the student guide over the Model
+Context Protocol. OpenAI provides the embeddings for memory search and the
+moderation endpoint. Per-user memory is stored in PostgreSQL with the pgvector
+extension.
 
-```
-┌───────────┐     ┌──────────────────────────┐     ┌──────────────────────────┐
-│  Browser  │ ──► │  Surface                 │ ──► │  Bark Agent              │
-│           │     │  web app and API server  │     │  this repository         │
-└───────────┘     └──────────────────────────┘     └─────────────┬────────────┘
-                                                                 │
-           ┌──────────────────────────┬──────────────────────────┘
-           ▼                          ▼                          ▼
-┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-│  OpenRouter          │   │  CMU MCP server      │   │  PostgreSQL          │
-│  language models     │   │  campus data tools   │   │  memory (pgvector)   │
-└──────────────────────┘   └──────────────────────┘   └──────────────────────┘
+```mermaid
+flowchart TB
+    browser["Browser"]
+    surface["Surface<br/>web app and API server"]
+    agent["Bark Agent<br/>(this repository)"]
+    openrouter["OpenRouter<br/>language models"]
+    mcp["CMU MCP server<br/>campus data tools"]
+    openai["OpenAI<br/>embeddings, moderation"]
+    postgres["PostgreSQL<br/>user memory (pgvector)"]
+
+    browser -->|chat| surface
+    surface -->|"POST /agent/respond/stream"| agent
+    agent --> openrouter
+    agent --> mcp
+    agent --> openai
+    agent --> postgres
+
+    style agent stroke-width:3px
 ```
 
 ## Request lifecycle
@@ -117,61 +126,77 @@ cmugpt-agent/
 
 ## Requirements
 
-- Python 3.12. uv installs it if it is not present.
-- [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- PostgreSQL with the pgvector extension, for persistent memory. Optional for
-  local development.
-- [devenv](https://devenv.sh) with direnv, for the same environment CI and
-  production use. Optional. It provides PostgreSQL with pgvector, exports
-  `DATABASE_URL`, and installs the project's git hooks (ruff, ty, formatting,
-  TOML checks, and secret scanning).
+- [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs
+  Python 3.12 if no suitable interpreter is present.
+- PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector)
+  extension.
+- An [OpenRouter API key](https://openrouter.ai/settings/keys) and an
+  [OpenAI API key](https://platform.openai.com/api-keys).
 
 ## Installation
 
-```sh
-git clone https://git.cmu.dev/ScottyLabs/cmugpt-agent.git
-cd cmugpt-agent
-uv sync
-cp .env.example .env
-```
+The steps below set up local development with the full feature set:
+persistent memory, semantic memory search, and moderation. This
+configuration is strongly recommended because the service then behaves as
+it does in production. The service also starts without `OPENAI_API_KEY` or
+`DATABASE_URL`, with the reduced behavior described under Configuration.
 
-Edit `.env` and set the variables described below.
+1. Clone the repository and install its dependencies.
+
+   ```sh
+   git clone https://git.cmu.dev/ScottyLabs/cmugpt-agent.git
+   cd cmugpt-agent
+   uv sync
+   ```
+
+2. Create the memory database. Install
+   [PostgreSQL](https://www.postgresql.org/download/) and the
+   [pgvector extension](https://github.com/pgvector/pgvector#installation),
+   then create an empty database named `cmugpt_agent`. The service creates
+   the pgvector extension, its schema, and its tables on first start. The
+   [devenv](https://devenv.sh) shell defined in `devenv.nix` is an
+   alternative to installing PostgreSQL by hand and provides a database with
+   pgvector already set up.
+
+3. Create the environment file and add the API keys.
+
+   ```sh
+   cp .env.example .env
+   ```
+
+   Then set the two keys in `.env`:
+
+   ```
+   OPENROUTER_API_KEY=<your OpenRouter key>
+   OPENAI_API_KEY=<your OpenAI key>
+   ```
+
+   `MCP_SERVER_URL` and `DATABASE_URL` are prefilled. They point at the
+   production MCP server and at the `cmugpt_agent` database on the local
+   default socket.
 
 ## Configuration
 
 All configuration is read from environment variables by `settings.py`.
 `.env.example` documents each variable and its default.
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `OPENROUTER_API_KEY` | Yes | Chat, memory extraction, and chat titles |
-| `MCP_SERVER_URL` | Yes | Base URL of the CMU MCP server |
-| `OPENAI_API_KEY` | Recommended | Embeddings for memory search and the moderation endpoint. Without it, recall orders facts by recency and moderation is skipped |
-| `AGENT_SHARED_SECRET` | In production | Bearer token the Surface presents on every request. Empty disables authentication |
-| `DATABASE_URL` | In production | PostgreSQL connection string. Unset selects an in-memory store that is cleared on restart |
-| `ALLOWED_ORIGINS` | No | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
-| `PORT` | No | Listening port. Default `5000` |
-| `TITLE_MODEL` | No | Model for chat titles. Default `qwen/qwen3.7-flash` |
-| `MEMORY_EXTRACTION_MODEL` | No | Model for background fact extraction. Default `qwen/qwen3.7-flash` |
-| `TOKEN_USAGE_DB` | No | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
+| Variable | Purpose |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Chat, memory extraction, and chat titles |
+| `OPENAI_API_KEY` | Embeddings for memory search and the moderation endpoint. Unset, recall orders facts by recency and moderation is skipped |
+| `DATABASE_URL` | PostgreSQL connection string. Unset, memory lives in an in-memory store that is cleared on restart |
+| `MCP_SERVER_URL` | Base URL of the CMU MCP server, including the `/mcp` path |
+| `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, requests are unauthenticated. Set in production |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
+| `PORT` | Listening port. Default `5000` |
+| `TITLE_MODEL` | Model for chat titles. Default `qwen/qwen3.7-flash` |
+| `MEMORY_EXTRACTION_MODEL` | Model for background fact extraction. Default `qwen/qwen3.7-flash` |
+| `TOKEN_USAGE_DB` | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
 
-### Memory database
-
-For persistent memory, create a PostgreSQL database with the pgvector
-extension and point `DATABASE_URL` at it. The service creates its own schema
-and tables on first start.
-
-```sh
-createdb cmugpt_agent
-psql -d cmugpt_agent -c 'CREATE EXTENSION IF NOT EXISTS vector;'
-```
-
-```
-DATABASE_URL=postgresql:///cmugpt_agent?host=/tmp
-```
-
-With devenv, this step is unnecessary. The shell provides a local PostgreSQL
-instance with pgvector and exports `DATABASE_URL`.
+Production does not read `.env`. Kennel injects `DATABASE_URL` for its managed
+PostgreSQL instance, the API keys and `MCP_SERVER_URL` come from OpenBao, and
+`AGENT_SHARED_SECRET` is set so that only the Surface can call the service.
+See Deployment.
 
 ## Running the service
 
@@ -179,14 +204,14 @@ instance with pgvector and exports `DATABASE_URL`.
 uv run cmugpt-agent
 ```
 
-The service listens on port 5000 by default. Confirm it is healthy:
+The service listens on port 5000. Confirm it is healthy:
 
 ```sh
 curl -s localhost:5000/api/health
 ```
 
 ```json
-{"status": "ok", "memory": {"backend": "postgres", "initialized": true, "semantic_search": true, "embedding_model": "text-embedding-3-large", "ready": true}}
+{"status":"ok","memory":{"backend":"postgres","initialized":true,"semantic_search":true,"embedding_model":"text-embedding-3-large","ready":true}}
 ```
 
 `backend` reports `in-memory` when `DATABASE_URL` is unset, and
@@ -260,10 +285,6 @@ uv run ruff check     # lint. The project configuration applies fixes.
 uv run ty check       # type check
 ```
 
-Entering the devenv shell installs the project's git hooks. CI runs the same
-checks over the whole repository.
-
-
 ## Deployment
 
 Production runs on [Kennel](https://git.cmu.dev/ScottyLabs/kennel), the
@@ -273,43 +294,11 @@ ScottyLabs deployment platform. Kennel builds the `agent` package defined in
 `secretspec.toml` injected as environment variables. Pushes to `main` on
 git.cmu.dev trigger a deployment, and each pull request receives a preview
 deployment.
-- https://api.cmugpt-agent.scottylabs.org (custom domain)
-- https://cmugpt-agent-agent-main.scottylabs.net (default Kennel URL)
 
-Verify that a change builds before pushing:
-
-```sh
-SECRETSPEC_PROVIDER=dotenv://.env devenv build scottylabs.kennel.config
-nix build .#packages.x86_64-linux.agent
-```
+- <https://api.cmugpt-agent.scottylabs.org> (custom domain)
+- <https://cmugpt-agent-agent-main.scottylabs.net> (default Kennel URL)
 
 Production secrets are stored in OpenBao and managed with secretspec.
-Membership in the `cmugpt-agent-admins` group and `bao login -method=oidc`
-are required:
-
-```sh
-secretspec set -P prod OPENROUTER_API_KEY
-secretspec set -P prod OPENAI_API_KEY
-secretspec set -P prod MCP_SERVER_URL
-secretspec set -P prod AGENT_SHARED_SECRET
-secretspec check -P prod
-```
-
-`DATABASE_URL` is not stored as a secret. Kennel injects it from its managed
-PostgreSQL instance.
-
-The service has a production startup check that refuses to run unless
-`DATABASE_URL` is set and `AGENT_SHARED_SECRET` is at least 32 characters
-long. The check activates only when `AGENT_ENV`, `APP_ENV`, `ENVIRONMENT`, or
-`SECRETSPEC_PROFILE` is set to `production` or `prod`. Kennel sets none of
-these, so the check is inactive in the current deployment.
-
-Memory search uses a pgvector `halfvec(3072)` index sized for OpenAI's
-`text-embedding-3-large`. On startup the service verifies that an existing
-`store_vectors` table matches this shape and refuses to run against a table
-built for a different embedding model. To recover, drop the `store_vectors`
-and `vector_migrations` tables in the `agent_memory` schema and restart. Any
-memory that must be retained has to be re-indexed.
 
 ## Code style
 
@@ -335,6 +324,7 @@ For `ruff`:
 ## Related repositories
 
 - [cmugpt-surface](https://git.cmu.dev/ScottyLabs/cmugpt-surface): the web application and its server.
+- [mcp-server](https://git.cmu.dev/ScottyLabs/mcp-server): the CMU MCP server that publishes the campus data tools.
 - [kennel](https://git.cmu.dev/ScottyLabs/kennel): the deployment platform.
 
 ## License
