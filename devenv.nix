@@ -29,9 +29,9 @@
 
   processes.agent = {
     exec = "secretspec run --profile dev -- uv run cmugpt-agent";
-    env.PORT = "5000";
+    env.PORT = "5055";
     ready.http.get = {
-      port = 5000;
+      port = 5055;
       path = "/api/health";
     };
   };

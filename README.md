@@ -189,7 +189,7 @@ All configuration is read from environment variables by `settings.py`.
 | `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, requests are unauthenticated. Set in production |
 | `AGENT_ENV` | `production` makes startup fail without `DATABASE_URL` and an `AGENT_SHARED_SECRET` of at least 32 characters. The `prod` profile of `secretspec.toml` sets it |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
-| `PORT` | Listening port. Default `5000` |
+| `PORT` | Listening port. Default `5055` |
 | `TITLE_MODEL` | Model for chat titles. Default `qwen/qwen3.7-flash` |
 | `MEMORY_EXTRACTION_MODEL` | Model for background fact extraction. Default `qwen/qwen3.7-flash` |
 | `TOKEN_USAGE_DB` | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
@@ -205,10 +205,10 @@ See Deployment.
 uv run cmugpt-agent
 ```
 
-The service listens on port 5000. Confirm it is healthy:
+The service listens on port 5055. Confirm it is healthy:
 
 ```sh
-curl -s localhost:5000/api/health
+curl -s localhost:5055/api/health
 ```
 
 ```json
@@ -238,7 +238,7 @@ the header `Authorization: Bearer <secret>`.
 Example request:
 
 ```sh
-curl -s localhost:5000/agent/respond \
+curl -s localhost:5055/agent/respond \
   -H 'content-type: application/json' \
   -d '{"query": "What is open for lunch near Gates?", "user_id": "example"}'
 ```

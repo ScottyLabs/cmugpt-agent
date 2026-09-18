@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     memory_extraction_model: str = "qwen/qwen3.7-flash"
     # SQLite file that stores the per-user daily token budget.
     token_usage_db: str = "/tmp/cmugpt_token_usage.sqlite3"
-    port: int = 5000
+    port: int = 5055
     # "production" or "prod" makes startup fail without DATABASE_URL and an
     # AGENT_SHARED_SECRET of at least 32 characters. The prod profile of
     # secretspec.toml sets it.
