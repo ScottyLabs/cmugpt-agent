@@ -117,7 +117,6 @@ cmugpt-agent/
 ├── evals/                      # Live evaluations, run manually
 │
 ├── pyproject.toml              # Dependencies, entry point, tool configuration
-├── Procfile                    # Start command from the earlier Railway deployment, unused by Kennel
 ├── devenv.nix                  # Local environment and Kennel settings
 ├── flake.nix                   # Nix build
 ├── secretspec.toml             # Secret declarations
