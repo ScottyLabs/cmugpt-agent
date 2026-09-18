@@ -42,21 +42,14 @@ class Settings(BaseSettings):
     # SQLite file that stores the per-user daily token budget.
     token_usage_db: str = "/tmp/cmugpt_token_usage.sqlite3"
     port: int = 5000
-    # Any of these set to prod or production marks a production deployment.
+    # "production" or "prod" makes startup fail without DATABASE_URL and an
+    # AGENT_SHARED_SECRET of at least 32 characters. The prod profile of
+    # secretspec.toml sets it.
     agent_env: str = ""
-    app_env: str = ""
-    environment: str = ""
-    secretspec_profile: str = ""
 
     @property
     def is_production(self) -> bool:
-        flags = (
-            self.agent_env,
-            self.app_env,
-            self.environment,
-            self.secretspec_profile,
-        )
-        return any(flag.strip().lower() in _PRODUCTION_VALUES for flag in flags)
+        return self.agent_env.strip().lower() in _PRODUCTION_VALUES
 
     @property
     def allowed_origin_list(self) -> list[str]:

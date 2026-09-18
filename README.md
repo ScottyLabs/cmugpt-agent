@@ -187,6 +187,7 @@ All configuration is read from environment variables by `settings.py`.
 | `DATABASE_URL` | PostgreSQL connection string. Unset, memory lives in an in-memory store that is cleared on restart |
 | `MCP_SERVER_URL` | Base URL of the CMU MCP server, including the `/mcp` path |
 | `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, requests are unauthenticated. Set in production |
+| `AGENT_ENV` | `production` makes startup fail without `DATABASE_URL` and an `AGENT_SHARED_SECRET` of at least 32 characters. The `prod` profile of `secretspec.toml` sets it |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
 | `PORT` | Listening port. Default `5000` |
 | `TITLE_MODEL` | Model for chat titles. Default `qwen/qwen3.7-flash` |
@@ -291,7 +292,9 @@ Production runs on [Kennel](https://git.cmu.dev/ScottyLabs/kennel), the
 ScottyLabs deployment platform. Kennel builds the `agent` package defined in
 `flake.nix` and runs its `cmugpt-agent` entry point as a systemd unit, with
 `PORT`, `DATABASE_URL`, and the secrets from the `prod` profile of
-`secretspec.toml` injected as environment variables. Pushes to `main` on
+`secretspec.toml` injected as environment variables. That profile sets
+`AGENT_ENV=production`, so the service refuses to start without `DATABASE_URL`
+and an `AGENT_SHARED_SECRET` of at least 32 characters. Pushes to `main` on
 git.cmu.dev trigger a deployment, and each pull request receives a preview
 deployment.
 
