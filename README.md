@@ -2,9 +2,9 @@
 
 Bark Agent is the backend service for Bark, the campus assistant for Carnegie
 Mellon University built by ScottyLabs. It receives chat messages from the Bark
-web application, answers them with a language model and a set of campus data
-tools, applies safety and accuracy checks to each answer, and maintains
-long-term memory for each user.
+web application and answers them with a language model and a set of campus
+data tools. Each answer is checked for safety and accuracy before it is
+returned, and the service keeps long-term memory for each user.
 
 ## Overview
 
@@ -21,9 +21,9 @@ Bark consists of two services.
 Campus data comes from the CMU MCP server
 ([mcp-server](https://git.cmu.dev/ScottyLabs/mcp-server)), which publishes
 tools for maps, courses, dining, and the student guide over the Model
-Context Protocol. OpenAI provides the embeddings for memory search and the
-moderation endpoint. Per-user memory is stored in PostgreSQL with the pgvector
-extension.
+Context Protocol. OpenAI provides the embeddings used for memory search and
+the moderation endpoint. Per-user memory is stored in PostgreSQL with the
+pgvector extension.
 
 ```mermaid
 flowchart TB
@@ -47,31 +47,35 @@ flowchart TB
 
 ## Request lifecycle
 
+A request passes through five stages.
+
 1. Validation. The Surface posts the message, the prior turns of the chat, and
-   a hashed user identifier. The service enforces request size limits, checks
-   the user's daily token budget, and screens the message with OpenAI's
-   moderation endpoint before any model call.
-2. Planning. `planning.py` determines what the turn requires: which tool
-   groups to bind, whether the `remember` and `forget` tools are needed, and
-   whether memory recall should run. Conversational messages bind no data
-   tools. The map tool is bound on every turn unless the user has disabled
-   maps, since the model decides whether a map belongs in the answer.
-3. Execution. `graph.py` runs a LangGraph graph: recall relevant facts about
-   the user, invoke the model, execute any tool calls, and repeat until the
-   model produces a final answer. Tool output is wrapped as untrusted data so
-   that it cannot inject instructions.
+   a hashed user identifier. Before any model call, the service enforces
+   request size limits, checks the user's daily token budget, and screens the
+   message with OpenAI's moderation endpoint.
+2. Planning. `planning.py` determines what the turn requires. It decides
+   which tool groups to bind, whether the `remember` and `forget` tools are
+   needed, and whether memory recall should run. Conversational messages bind
+   no data tools. The map tool is bound on every turn unless the user has
+   disabled maps, because the model decides whether a map belongs in the
+   answer.
+3. Execution. `graph.py` runs a LangGraph graph. It recalls relevant facts
+   about the user, invokes the model, executes any tool calls, and repeats
+   until the model produces a final answer. Tool output is wrapped as
+   untrusted data so that it cannot inject instructions.
 4. Verification. `guards.py` and the `maps/` package check the finished
    answer without a model. The model's map selection is validated against the
-   building catalog, incorrect claims that a lookup failed are repaired,
-   secrets and system prompt text are removed, and tool usage is disclosed
+   building catalog, and incorrect claims that a lookup failed are repaired.
+   Secrets and system prompt text are removed, and tool usage is disclosed
    accurately.
 5. Delivery. The answer is streamed to the Surface as Server-Sent Events.
    Once the answer is complete, a background task extracts durable facts
    about the user from the exchange and stores them for future turns.
 
-Memory holds only extracted facts and facts the user explicitly asks Bark to
-remember. Raw chat turns are never stored. Users can view and delete their
-facts through the Surface, and each user's memory is isolated by identifier.
+Memory holds only the facts extracted from conversations and the facts a
+user explicitly asks Bark to remember. Raw chat turns are never stored. A
+user can view and delete their facts through the Surface, and each user's
+memory is kept separate by identifier.
 
 ## Project structure
 
@@ -125,6 +129,8 @@ cmugpt-agent/
 
 ## Requirements
 
+You will need:
+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs
   Python 3.12 if no suitable interpreter is present.
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector)
@@ -136,8 +142,8 @@ cmugpt-agent/
 
 The steps below set up local development with the full feature set:
 persistent memory, semantic memory search, and moderation. This
-configuration is strongly recommended because the service then behaves as
-it does in production. The service also starts without `OPENAI_API_KEY` or
+configuration is recommended, since the service then behaves as it does in
+production. The service also starts without `OPENAI_API_KEY` or
 `DATABASE_URL`, with the reduced behavior described under Configuration.
 
 1. Clone the repository and install its dependencies.
@@ -152,10 +158,10 @@ it does in production. The service also starts without `OPENAI_API_KEY` or
    [PostgreSQL](https://www.postgresql.org/download/) and the
    [pgvector extension](https://github.com/pgvector/pgvector#installation),
    then create an empty database named `cmugpt_agent`. The service creates
-   the pgvector extension, its schema, and its tables on first start. The
-   [devenv](https://devenv.sh) shell defined in `devenv.nix` is an
-   alternative to installing PostgreSQL by hand and provides a database with
-   pgvector already set up.
+   the pgvector extension, its schema, and its tables on first start. If you
+   prefer not to install PostgreSQL by hand, the [devenv](https://devenv.sh)
+   shell defined in `devenv.nix` provides a database with pgvector already
+   set up.
 
 3. Create the environment file and add the API keys.
 
@@ -176,8 +182,8 @@ it does in production. The service also starts without `OPENAI_API_KEY` or
 
 ## Configuration
 
-All configuration is read from environment variables by `settings.py`.
-`.env.example` documents each variable and its default.
+All configuration is read from environment variables by `settings.py`, and
+`.env.example` documents each variable with its default.
 
 | Variable | Purpose |
 | --- | --- |
@@ -194,17 +200,20 @@ All configuration is read from environment variables by `settings.py`.
 | `TOKEN_USAGE_DB` | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
 
 Production does not read `.env`. Kennel injects `DATABASE_URL` for its managed
-PostgreSQL instance, the API keys and `MCP_SERVER_URL` come from OpenBao, and
-`AGENT_SHARED_SECRET` is set so that only the Surface can call the service.
-See Deployment.
+PostgreSQL instance, the API keys and `MCP_SERVER_URL` are resolved from
+OpenBao, and `AGENT_SHARED_SECRET` is set so that only the Surface can call
+the service. See Deployment.
 
 ## Running the service
+
+Start the service with:
 
 ```sh
 uv run cmugpt-agent
 ```
 
-The service listens on port 5055. Confirm it is healthy:
+It listens on port 5055. To confirm that it is healthy, request the health
+route:
 
 ```sh
 curl -s localhost:5055/api/health
@@ -215,9 +224,9 @@ curl -s localhost:5055/api/health
 ```
 
 `backend` reports `in-memory` when `DATABASE_URL` is unset, and
-`semantic_search` is `false` when `OPENAI_API_KEY` is unset. The endpoint
-returns HTTP 503 with `"status": "degraded"` when the memory store cannot be
-queried.
+`semantic_search` is `false` when `OPENAI_API_KEY` is unset. When the memory
+store cannot be queried, the endpoint returns HTTP 503 with
+`"status": "degraded"`.
 
 ## API
 
@@ -234,7 +243,7 @@ the header `Authorization: Bearer <secret>`.
 | `DELETE /memory/{user_id}` | Deletes all facts for a user |
 | `GET /api/health` | Service status and active memory backend |
 
-Example request:
+For example:
 
 ```sh
 curl -s localhost:5055/agent/respond \
@@ -252,11 +261,11 @@ Request fields for `/agent/respond` and `/agent/respond/stream`:
 | `model` | OpenRouter model identifier. Default `openai/gpt-5.6-luna` |
 | `disabled_tools` | Tool groups the user has switched off: `maps`, `courses`, `eats`, `guide` |
 
-The streaming endpoint emits `status` events while tools run, `delta` events
-carrying text as it is generated, a `map` event when a campus map accompanies
-the answer, a `memory` event when a fact is saved or removed, and a final
-`done` event containing the complete response object. An `error` event
-terminates a failed turn.
+The streaming endpoint emits several event types. `status` events are sent
+while tools run, and `delta` events carry text as it is generated. A `map`
+event is sent when a campus map accompanies the answer, and a `memory` event
+when a fact is saved or removed. A final `done` event contains the complete
+response object, and an `error` event terminates a failed turn.
 
 Each user is limited to one million tokens per day. Requests beyond that
 limit receive HTTP 429.
@@ -268,16 +277,20 @@ DATABASE_URL="" uv run pytest    # offline unit tests, as run by CI
 uv run pytest evals              # live evaluations
 ```
 
-Unit tests in `tests/unit/` run with the model replaced by a stub and an
-in-memory store. They are deterministic and fail only when code is incorrect.
+The unit tests in `tests/unit/` run with the model replaced by a stub and an
+in-memory store. They are deterministic and fail only when the code is
+incorrect.
 
-Evaluations in `evals/` send real questions to the configured model and MCP
-server and check the behavior of the answers: tool usage, refusal of prompt
-injection, and absence of fabricated details. They require `OPENROUTER_API_KEY`
-and `MCP_SERVER_URL`, incur API costs, and skip automatically when the keys
-are absent. They are not part of the default `pytest` run.
+The evaluations in `evals/` send real questions to the configured model and
+MCP server and check the behavior of the answers: tool usage, refusal of
+prompt injection, and absence of fabricated details. They require
+`OPENROUTER_API_KEY` and `MCP_SERVER_URL` and incur API costs. When either key
+is absent they are skipped, and they are not part of the default `pytest`
+run.
 
 ## Development
+
+The code is formatted and linted with ruff and type-checked with ty:
 
 ```sh
 uv run ruff format    # format
@@ -289,9 +302,9 @@ uv run ty check       # type check
 
 Production runs on [Kennel](https://git.cmu.dev/ScottyLabs/kennel), the
 ScottyLabs deployment platform. Kennel builds the `agent` package defined in
-`flake.nix` and runs its `cmugpt-agent` entry point as a systemd unit, with
-`PORT`, `DATABASE_URL`, and the secrets from the `prod` profile of
-`secretspec.toml` injected as environment variables. That profile sets
+`flake.nix` and runs its `cmugpt-agent` entry point as a systemd unit. `PORT`,
+`DATABASE_URL`, and the secrets from the `prod` profile of `secretspec.toml`
+are injected as environment variables. That profile sets
 `AGENT_ENV=production`, so the service refuses to start without `DATABASE_URL`
 and an `AGENT_SHARED_SECRET` of at least 32 characters. Pushes to `main` on
 git.cmu.dev trigger a deployment, and each pull request receives a preview
@@ -302,26 +315,10 @@ deployment.
 
 Production secrets are stored in OpenBao and managed with secretspec.
 
-## Code style
+## Contributing
 
-Do not disable `ruff` or `ty` rules for the whole project. Where a line
-requires an exception, use the narrowest directive that applies, in this
-order of preference.
-
-For `ty`:
-
-1. `# ty: ignore[<rule>]` for a single rule
-2. `# ty: ignore[rule1, rule2]` for several rules
-3. `# type: ignore` or `# type: ignore[<rule>]` for all violations on the line, even when a rule is named
-4. `@typing.no_type_check` on a function
-
-For `ruff`:
-
-1. `# noqa: <rule>` for a single rule
-2. `# noqa: rule1, rule2` for several rules
-3. `# noqa` for all violations on the line
-4. `# ruff: noqa: <rule>` for a single rule across a file
-5. `# ruff: noqa` for all violations across a file
+[CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, the code style,
+the commit conventions, and the pull request process.
 
 ## Related repositories
 

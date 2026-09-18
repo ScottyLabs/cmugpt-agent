@@ -28,6 +28,10 @@ result-*
 # AI
 .mcp.json
 .claude
+.cursor/
+.aider*
+.continue/
+.copilot/
 
 # direnv
 .direnv/
