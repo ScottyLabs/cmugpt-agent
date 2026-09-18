@@ -1,7 +1,8 @@
-"""Live evaluations call OpenRouter and the CMU MCP server, so they need real
-keys and incur API costs. The default `uv run pytest` collects only
-tests/unit. Run these with `uv run pytest evals`. When the keys are absent,
-every test here is skipped.
+"""Live evaluations against OpenRouter and the CMU MCP server.
+
+They need real keys and incur API costs. The default `uv run pytest` collects
+only tests/unit. Run these with `uv run pytest evals`. When the keys are
+absent, every test here is skipped.
 """
 
 import pytest

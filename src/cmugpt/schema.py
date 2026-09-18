@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ActionType(StrEnum):
-    """Types of actions the agent can take"""
+    """Types of actions the agent can take."""
 
     QUERY = "query"
     RETRIEVE = "retrieve"
@@ -20,7 +20,7 @@ class ActionType(StrEnum):
 
 
 class ToolCall(BaseModel):
-    """Represents a tool/MCP call made by the agent"""
+    """Represents a tool/MCP call made by the agent."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -32,7 +32,7 @@ class ToolCall(BaseModel):
 
 
 class Thought(BaseModel):
-    """Represents the agent's reasoning"""
+    """Represents the agent's reasoning."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,7 +43,7 @@ class Thought(BaseModel):
 
 
 class Metadata(BaseModel):
-    """Additional context metadata"""
+    """Additional context metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -72,7 +72,7 @@ class CmuMaps(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    """Structured response from the Bark Agent"""
+    """Structured response from the Bark Agent."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -99,7 +99,7 @@ class AgentResponse(BaseModel):
 
 
 class UserInput(BaseModel):
-    """Input from the Surface to the Agent"""
+    """Input from the Surface to the Agent."""
 
     model_config = ConfigDict(extra="forbid")
 

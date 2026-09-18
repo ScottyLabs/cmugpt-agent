@@ -35,7 +35,7 @@ _SCHEMA = (
 )
 
 
-class DailyTokenLimitExceeded(Exception):
+class DailyTokenLimitError(Exception):
     """Raised when a user has spent the daily token budget."""
 
     def __init__(self, user_id: str, used: int) -> None:
@@ -78,11 +78,11 @@ def _read_tokens(key: str) -> int:
 
 
 def ensure_within_daily_limit(user_id: str | None) -> None:
-    """Raise DailyTokenLimitExceeded when the user's budget is spent."""
+    """Raise DailyTokenLimitError when the user's budget is spent."""
     key = _user_key(user_id)
     used = _read_tokens(key)
     if used >= DAILY_TOKEN_LIMIT:
-        raise DailyTokenLimitExceeded(key, used)
+        raise DailyTokenLimitError(key, used)
 
 
 def record_usage(user_id: str | None, tokens: int) -> None:

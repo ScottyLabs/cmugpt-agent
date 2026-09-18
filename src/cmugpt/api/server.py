@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_runtime_configuration() -> None:
-    """Refuse to start a production deployment without a database or a shared
-    secret. Starting anyway would run without durable memory or auth."""
+    """Refuse to start in production without a database and a shared secret.
+
+    Starting anyway would run without durable memory or authentication.
+    """
     settings = get_settings()
     if not settings.is_production:
         return
@@ -48,8 +50,10 @@ def _validate_runtime_configuration() -> None:
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Open the memory store when the app starts. On shutdown, wait for any
-    background memory writes to finish, then close the store."""
+    """Open the memory store on startup and close it on shutdown.
+
+    Shutdown waits for background memory writes to finish before closing.
+    """
     _validate_runtime_configuration()
     if not get_settings().agent_shared_secret:
         logger.warning(

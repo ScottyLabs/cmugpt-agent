@@ -20,7 +20,7 @@ from cmugpt.moderation import (
 )
 from cmugpt.schema import UserInput
 from cmugpt.title import generate_chat_title
-from cmugpt.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
+from cmugpt.token_limits import DailyTokenLimitError, ensure_within_daily_limit
 
 from ..deps import reject_oversized_body, require_shared_secret
 
@@ -189,7 +189,7 @@ def _enforce_daily_token_limit(user_input: UserInput) -> None:
     """
     try:
         ensure_within_daily_limit(user_input.user_id)
-    except DailyTokenLimitExceeded as exc:
+    except DailyTokenLimitError as exc:
         raise HTTPException(
             status_code=HTTPStatus.TOO_MANY_REQUESTS,
             detail=str(exc),

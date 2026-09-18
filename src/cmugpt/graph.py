@@ -126,8 +126,10 @@ _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 class _Node(Protocol):
-    """A graph node: reads the state, may emit stream events, and returns the
-    state update to merge. LangGraph passes `writer` by keyword."""
+    """A graph node that returns the state update to merge.
+
+    LangGraph passes `writer` by keyword, so it is keyword-only here.
+    """
 
     def __call__(
         self, state: AgentState, *, writer: StreamWriter

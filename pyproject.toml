@@ -72,5 +72,11 @@ select = [
   "SIM",
   # isort
   "I",
+  # pep8-naming
+  "N",
+  # pydocstyle, PEP 257 form only: summary line, blank line, period, closing quotes
+  "D205",
+  "D209",
+  "D400",
 ]
 

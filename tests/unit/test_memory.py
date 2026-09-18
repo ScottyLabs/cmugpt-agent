@@ -426,8 +426,10 @@ async def test_growth_caps_prune_oldest() -> None:
 
 
 async def test_explicit_facts_evicted_last() -> None:
-    """At the cap, auto-extracted facts are dropped before explicit saves,
-    even when the explicit saves are older."""
+    """At the cap, auto-extracted facts are dropped before explicit saves.
+
+    That holds even when the explicit saves are older.
+    """
     original = memory.facts.MAX_FACTS
     original_every = memory.facts.CAP_CHECK_EVERY
     memory.facts.MAX_FACTS = 3
