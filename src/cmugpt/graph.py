@@ -52,7 +52,7 @@ from .guards import (
     is_flagrant_injection,
     should_require_tool,
 )
-from .llm import api_key, chat_model
+from .llm import chat_model
 from .maps.inference import (
     SHOW_MAP_TOOL_NAME,
     _apply_cmu_maps_guard,
@@ -70,8 +70,9 @@ from .memory import (
     recall,
 )
 from .planning import helper_messages, prepare_tools_and_store, sanitize_history
-from .prompts import build_system_prompt
+from .prompts import build_system_prompt, is_routing_tool
 from .schema import ActionType, AgentResponse, CmuMaps, Metadata, Thought, UserInput
+from .settings import get_settings
 from .token_limits import record_usage
 
 logger = logging.getLogger(__name__)
@@ -320,17 +321,6 @@ def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bo
     return agent_node
 
 
-# Substrings marking a tool as routing rather than data-returning. A routing
-# failure does not degrade the answer, because the attached map already shows
-# the route.
-_ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
-
-
-def _is_routing_tool(name: str) -> bool:
-    lowered = name.lower()
-    return any(hint in lowered for hint in _ROUTING_TOOL_HINTS)
-
-
 def _tool_failure_notice(name: str, maps_enabled: bool) -> str:
     """Model-facing replacement for a failed tool result.
 
@@ -339,7 +329,7 @@ def _tool_failure_notice(name: str, maps_enabled: bool) -> str:
     that narrate a failure instead of answering. Routing failures are
     additionally invisible to the user, since the map is attached regardless.
     """
-    if maps_enabled and _is_routing_tool(name):
+    if maps_enabled and is_routing_tool(name):
         return (
             "No turn-by-turn route data is available. An interactive campus "
             "map of this route is attached to your answer automatically. "
@@ -690,7 +680,7 @@ async def run_agent(
     `disabled_tools` lists the tool groups the user switched off in the Surface
     (`maps`, `courses`, `eats`, `guide`). Those tools are never bound.
     """
-    if not api_key():
+    if not get_settings().openrouter_api_key:
         return _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,
@@ -732,7 +722,7 @@ async def stream_agent_response(
     disabled_tools: list[str] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Streaming entry point. Yields ('delta', ...) through ('done', ...)."""
-    if not api_key():
+    if not get_settings().openrouter_api_key:
         fb = _fallback_response(
             "OPENROUTER_API_KEY is not configured.",
             confidence=0.2,

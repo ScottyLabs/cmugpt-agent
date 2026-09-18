@@ -16,11 +16,6 @@ from .settings import get_settings
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
-def api_key() -> str:
-    """The OpenRouter key from the environment, or an empty string."""
-    return get_settings().openrouter_api_key
-
-
 @lru_cache(maxsize=32)
 def _build(
     model: str,
@@ -59,4 +54,5 @@ def chat_model(
     The key is read on every call and is part of the cache key, so a rotated
     OPENROUTER_API_KEY takes effect without a restart.
     """
-    return _build(model, api_key(), temperature, stream_usage, reasoning_off)
+    key = get_settings().openrouter_api_key
+    return _build(model, key, temperature, stream_usage, reasoning_off)

@@ -71,12 +71,8 @@ def _learn_allowed(user_id: str, *, now: float | None = None) -> bool:
     return True
 
 
-def _extraction_model_name() -> str:
-    return get_settings().memory_extraction_model
-
-
 def _extractor_model() -> ChatOpenAI:
-    return chat_model(_extraction_model_name(), temperature=0.0)
+    return chat_model(get_settings().memory_extraction_model, temperature=0.0)
 
 
 def _parse_facts(raw: str) -> list[str]:

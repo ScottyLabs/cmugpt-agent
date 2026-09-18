@@ -8,7 +8,7 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .llm import api_key, chat_model
+from .llm import chat_model
 from .moderation import ALLOW, moderate_text
 from .settings import get_settings
 
@@ -25,10 +25,6 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _title_model_name() -> str:
-    return get_settings().title_model
-
-
 def _clean(raw: str) -> str | None:
     """Normalize model output into a display-safe title, or None if empty."""
     title = raw.strip().split("\n")[0].strip().strip("\"'" + "\u201c\u201d")
@@ -43,7 +39,7 @@ def _clean(raw: str) -> str | None:
 async def generate_chat_title(first_message: str) -> str | None:
     """Return a short title for the chat, or None on failure."""
     text = first_message.strip()
-    if not api_key() or not text:
+    if not get_settings().openrouter_api_key or not text:
         return None
     # A flagged first message must not be echoed into a title. "New chat" is
     # the surface's default title, so returning it both neutralizes the title
@@ -51,7 +47,7 @@ async def generate_chat_title(first_message: str) -> str | None:
     verdict = await moderate_text(text)
     if verdict.action != ALLOW:
         return "New chat"
-    model = chat_model(_title_model_name(), temperature=0.0, reasoning_off=True)
+    model = chat_model(get_settings().title_model, temperature=0.0, reasoning_off=True)
     try:
         reply = await model.ainvoke(
             [

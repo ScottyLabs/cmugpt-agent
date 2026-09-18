@@ -28,15 +28,18 @@ from .memory import is_internal_memory_tool
 
 # Substrings identifying a tool as capable of returning a route between two
 # points rather than locating a single building. Matched against tool names
-# so the prompt adapts to whatever the MCP server exposes.
+# so the prompt, and the tool failure notice in graph.py, adapt to whatever
+# the MCP server exposes.
 _ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
 
 
+def is_routing_tool(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _ROUTING_TOOL_HINTS)
+
+
 def _has_routing_tool(tools: list[BaseTool] | None) -> bool:
-    return any(
-        any(hint in (tool.name or "").lower() for hint in _ROUTING_TOOL_HINTS)
-        for tool in (tools or [])
-    )
+    return any(is_routing_tool(tool.name or "") for tool in (tools or []))
 
 
 def _has_memory_tools(tools: list[BaseTool] | None) -> bool:

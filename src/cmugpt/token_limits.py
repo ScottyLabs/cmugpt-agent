@@ -77,10 +77,6 @@ def _read_tokens(key: str) -> int:
     return int(row[0]) if row else 0
 
 
-def tokens_used_today(user_id: str | None) -> int:
-    return _read_tokens(_user_key(user_id))
-
-
 def ensure_within_daily_limit(user_id: str | None) -> None:
     """Raise DailyTokenLimitExceeded when the user's budget is spent."""
     key = _user_key(user_id)

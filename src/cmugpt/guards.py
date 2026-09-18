@@ -110,20 +110,6 @@ def should_require_tool(messages: list[dict[str, Any]]) -> bool:
     return bool(CMU_DATA_RE.search(query))
 
 
-def tool_metadata_message(services_used: list[str]) -> dict[str, str]:
-    """System message reminding the model which tools were actually used."""
-    names = ", ".join(f"`{name}`" for name in services_used)
-    return {
-        "role": "system",
-        "content": (
-            "Tool-use metadata for this turn: MCP/tools used: "
-            f"{names}. If the user asks about tool or MCP usage, say that "
-            "tools were used and name these user-safe tools. Do not claim "
-            "that no tools were used."
-        ),
-    }
-
-
 def strip_negative_tool_claims(text: str) -> str:
     cleaned = text
     for pattern in NEGATIVE_TOOL_CLAIM_PATTERNS:
