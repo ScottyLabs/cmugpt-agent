@@ -110,7 +110,7 @@ def should_require_tool(messages: list[dict[str, Any]]) -> bool:
     return bool(CMU_DATA_RE.search(query))
 
 
-def strip_negative_tool_claims(text: str) -> str:
+def _strip_negative_tool_claims(text: str) -> str:
     cleaned = text
     for pattern in NEGATIVE_TOOL_CLAIM_PATTERNS:
         cleaned = pattern.sub("", cleaned)
@@ -134,7 +134,7 @@ def apply_tool_transparency_guard(
     names = ", ".join(f"`{name}`" for name in services_used)
     disclosure = f"I did use MCP-connected tools for this turn: {names}."
     text = parsed.response_text or ""
-    stripped = strip_negative_tool_claims(text)
+    stripped = _strip_negative_tool_claims(text)
     lower = stripped.lower()
     names_mentioned = any(name.lower() in lower for name in services_used)
     tool_mentioned = "tool" in lower or "mcp" in lower
@@ -206,7 +206,7 @@ def _secret_values() -> list[str]:
     return values
 
 
-def build_leak_corpus(system_prompt: str) -> str:
+def _build_leak_corpus(system_prompt: str) -> str:
     """Normalized prompt text with the echo-safe snippets removed.
 
     Snippets are replaced by a NUL byte so that no scan window can match
@@ -241,7 +241,7 @@ def _redact_bearer_match(match: re.Match[str]) -> str:
     return match.group(0)
 
 
-def redact_secrets(text: str) -> str:
+def _redact_secrets(text: str) -> str:
     cleaned = text
     for value in _secret_values():
         cleaned = cleaned.replace(value, _REDACTION)
@@ -260,7 +260,7 @@ _REASONING_TAG_RE = re.compile(
 )
 
 
-def strip_reasoning_tags(text: str) -> str:
+def _strip_reasoning_tags(text: str) -> str:
     return _REASONING_TAG_RE.sub("", text)
 
 
@@ -273,9 +273,9 @@ def apply_output_guard(text: str, system_prompt: str) -> tuple[str, bool]:
     """
     if not text:
         return text, False
-    if _matches_leak_corpus(text, build_leak_corpus(system_prompt)):
+    if _matches_leak_corpus(text, _build_leak_corpus(system_prompt)):
         return REFUSAL_TEXT, True
-    return strip_reasoning_tags(redact_secrets(text)), False
+    return _strip_reasoning_tags(_redact_secrets(text)), False
 
 
 class StreamScrubber:
@@ -292,7 +292,7 @@ class StreamScrubber:
     HOLDBACK_CHARS = 160
 
     def __init__(self, system_prompt: str) -> None:
-        self._corpus = build_leak_corpus(system_prompt) if system_prompt else ""
+        self._corpus = _build_leak_corpus(system_prompt) if system_prompt else ""
         self._secrets = _secret_values()
         self._text = ""
         # Count of cleaned (tag-stripped) characters already emitted. Tracking
@@ -311,7 +311,7 @@ class StreamScrubber:
     def _emit_up_to(self, safe_raw: str) -> str:
         # HOLDBACK_CHARS greatly exceeds any tag length, so safe_raw never ends
         # mid-tag and its cleaned form only grows as a stable prefix.
-        clean = strip_reasoning_tags(safe_raw)
+        clean = _strip_reasoning_tags(safe_raw)
         out = clean[self._emitted_clean :]
         self._emitted_clean = len(clean)
         return out

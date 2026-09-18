@@ -1,3 +1,9 @@
+"""Request and response models shared by the API routes and the agent graph.
+
+UserInput is the validated request body. AgentResponse is the structured
+reply, including the CMUMaps payload that the Surface renders as a map link.
+"""
+
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field

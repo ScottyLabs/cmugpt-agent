@@ -82,7 +82,7 @@ _RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*
 _MARKDOWN_BOILERPLATE_RE = re.compile(r"\s*formatted as clean markdown", re.IGNORECASE)
 
 
-def condense_tool_description(description: str | None) -> str:
+def _condense_tool_description(description: str | None) -> str:
     if not description:
         return ""
     condensed = _RETURNS_PARAGRAPH_RE.sub("", description)
@@ -233,7 +233,7 @@ async def load_mcp_tools() -> list[BaseTool]:
             # Condensing here propagates to both the prompt catalog and the
             # bound schemas, and the cache stores the condensed tools.
             for tool in tools:
-                tool.description = condense_tool_description(tool.description)
+                tool.description = _condense_tool_description(tool.description)
             ttl = _CACHE_TTL_SECONDS
         except Exception:
             # MCP unavailable: the turn continues without tools.

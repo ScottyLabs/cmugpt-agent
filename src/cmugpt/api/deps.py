@@ -23,7 +23,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def require_shared_secret(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008 - Depends() as a default is FastAPI's convention
 ) -> None:
     expected = get_settings().agent_shared_secret
     if not expected:

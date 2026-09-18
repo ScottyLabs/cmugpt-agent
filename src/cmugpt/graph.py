@@ -24,8 +24,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-from collections.abc import AsyncIterator
-from typing import Annotated, Any, TypedDict
+from collections.abc import AsyncIterator, Awaitable
+from typing import Annotated, Any, Protocol, TypedDict
 
 from langchain_core.messages import (
     AIMessage,
@@ -39,6 +39,7 @@ from langchain_core.tools import BaseTool, ToolException
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import StreamWriter
 
@@ -122,6 +123,15 @@ class AgentState(TypedDict):
 # discards a task nothing refers to, so references are held here until each
 # task completes.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+class _Node(Protocol):
+    """A graph node: reads the state, may emit stream events, and returns the
+    state update to merge. LangGraph passes `writer` by keyword."""
+
+    def __call__(
+        self, state: AgentState, *, writer: StreamWriter
+    ) -> Awaitable[dict[str, Any]]: ...
 
 
 async def drain_background_tasks(timeout: float = 15.0) -> None:
@@ -215,7 +225,9 @@ def _truncate_tool_result(result: str) -> str:
     return result[:_TOOL_RESULT_MAX_CHARS] + _TOOL_RESULT_TRUNCATION_MARKER
 
 
-def _build_agent_node(model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool):
+def _build_agent_node(
+    model: ChatOpenAI, tools: list[BaseTool], maps_enabled: bool
+) -> _Node:
     bound = model.bind_tools(tools) if tools else model
     bound_required = model.bind_tools(tools, tool_choice="required") if tools else model
     # Forcing a tool call applies only to CMU data lookups, so memory tools
@@ -343,7 +355,7 @@ def _tool_failure_notice(name: str, maps_enabled: bool) -> str:
     )
 
 
-def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True):
+def _build_tools_node(tools: list[BaseTool], maps_enabled: bool = True) -> _Node:
     tools_by_name = {tool.name: tool for tool in tools}
     # Tools this request built via build_memory_tools. Only these are
     # trusted. An MCP tool that is merely named "remember" remains
@@ -573,7 +585,7 @@ async def _postprocess_node(state: AgentState, writer: StreamWriter) -> dict[str
     return {"response_payload": payload, "response_text": parsed.response_text}
 
 
-def _build_recall_node(store: BaseStore):
+def _build_recall_node(store: BaseStore) -> _Node:
     """Read path: fetch top-k relevant memory and stage it for the agent node."""
 
     async def recall_node(state: AgentState, writer: StreamWriter) -> dict[str, Any]:
@@ -609,7 +621,7 @@ def build_graph(
     *,
     recall_enabled: bool,
     maps_enabled: bool = True,
-):
+) -> CompiledStateGraph:
     """Compile the agent graph for one request (model + tools + store captured).
 
     Shape: ``START -> recall -> agent`` then either ``-> tools -> agent`` or
