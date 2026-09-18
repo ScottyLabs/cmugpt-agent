@@ -9,8 +9,6 @@ dependencies = [
   "fastapi>=0.110.0",
   "uvicorn>=0.22.0",
   "httpx>=0.28.1",
-  "mcp>=1.28.1,<2.0.0",
-  "openai>=1.108.0",
   "pydantic>=2.12.5",
   "python-dotenv>=1.1.1",
   "langgraph>=1.2.4",
@@ -31,7 +29,6 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.2.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.11.10",
