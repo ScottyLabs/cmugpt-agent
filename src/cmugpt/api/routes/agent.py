@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
-from cmugpt import UserInput, run_agent, stream_agent_response
+from cmugpt.graph import run_agent, stream_agent_response
 from cmugpt.memory import is_valid_user_id
 from cmugpt.moderation import (
     ALLOW,
@@ -18,6 +18,7 @@ from cmugpt.moderation import (
     moderate_text,
     redacted_output_response,
 )
+from cmugpt.schema import UserInput
 from cmugpt.title import generate_chat_title
 from cmugpt.token_limits import DailyTokenLimitExceeded, ensure_within_daily_limit
 

@@ -1,10 +1,6 @@
-from .graph import run_agent, stream_agent_response
-from .schema import AgentResponse, CmuMaps, UserInput
+"""Bark, the CMU campus agent.
 
-__all__ = [
-    "run_agent",
-    "stream_agent_response",
-    "AgentResponse",
-    "CmuMaps",
-    "UserInput",
-]
+Entry points live in the submodules: cmugpt.graph for run_agent and
+stream_agent_response, cmugpt.schema for the request and response models,
+and cmugpt.api for the FastAPI app.
+"""

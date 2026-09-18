@@ -7,7 +7,7 @@ OPENROUTER_API_KEY and MCP_SERVER_URL are set.
 
 import pytest
 
-from cmugpt import run_agent
+from cmugpt.graph import run_agent
 from cmugpt.mcp_tools import load_mcp_tools
 from cmugpt.schema import UserInput
 from cmugpt.settings import get_settings

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from cmugpt import run_agent
+from cmugpt.graph import run_agent
 from cmugpt.maps.inference import _cmu_maps_success_text, _infer_cmu_maps
 from cmugpt.schema import AgentResponse, UserInput
 
