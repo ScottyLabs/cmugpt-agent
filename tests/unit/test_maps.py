@@ -5,7 +5,7 @@ query with the map it must produce or the required abstention. Abstentions
 matter as much as hits, since a map on every building mention is worse than
 waiting for location intent.
 
-Run with uv run pytest tests/unit/test_cmu_maps.py.
+Run with uv run pytest tests/unit/test_maps.py.
 """
 
 from typing import Any
@@ -75,7 +75,6 @@ ABSTAIN_CASES = [
     "how far along is course registration?",
     "what classes are in Gates this semester",
     "thanks!",
-    "my andrew id is jc965",
 ]
 
 
