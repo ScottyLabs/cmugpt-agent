@@ -90,7 +90,6 @@
           cmugptAgent = mkCmugptAgent system;
         in
         {
-          inherit cmugptAgent;
           agent = cmugptAgent;
           default = cmugptAgent;
         }

@@ -12,6 +12,9 @@ wheels/
 # Ruff
 .ruff_cache
 
+# Pytest
+.pytest_cache/
+
 # Environment Keys
 .env
 
@@ -25,6 +28,10 @@ result-*
 # AI
 .mcp.json
 .claude
+.cursor/
+.aider*
+.continue/
+.copilot/
 
 # direnv
 .direnv/

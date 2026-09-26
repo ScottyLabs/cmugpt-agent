@@ -24,10 +24,7 @@ jobs:
       - uses: https://code.forgejo.org/actions/checkout@v7
       - uses: https://git.cmu.dev/ScottyLabs/kennel/.forgejo/actions/prepare@main
 
-      - name: Test Agent
+      - name: Test
         # devenv exports DATABASE_URL on shell entry but CI runs no postgres.
         # Blank it so tests use the in-memory store.
-        run: devenv shell -- sh -c 'DATABASE_URL="" uv run python ci_test/test_agent.py'
-
-      - name: Test Memory
-        run: devenv shell -- sh -c 'DATABASE_URL="" uv run python ci_test/test_memory.py' 
+        run: devenv shell -- sh -c 'DATABASE_URL="" uv run pytest'
