@@ -129,8 +129,10 @@ cmugpt-agent/
 
 ## Requirements
 
-You will need:
+You will need the following, or Nix and devenv in their place (see
+Installation with devenv):
 
+- [Git](https://git-scm.com/downloads).
 - [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs
   Python 3.12 if no suitable interpreter is present.
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector)
@@ -161,7 +163,7 @@ production. The service also starts without `OPENAI_API_KEY` or
    the pgvector extension, its schema, and its tables on first start. If you
    prefer not to install PostgreSQL by hand, the [devenv](https://devenv.sh)
    shell defined in `devenv.nix` provides a database with pgvector already
-   set up.
+   set up (see Installation with devenv).
 
 3. Create the environment file and add the API keys.
 
@@ -179,6 +181,68 @@ production. The service also starts without `OPENAI_API_KEY` or
    `MCP_SERVER_URL` and `DATABASE_URL` are prefilled. They point at the
    production MCP server and at the `cmugpt_agent` database on the local
    default socket.
+
+## Installation with devenv
+
+Members of the `slai` team can use the [devenv](https://devenv.sh) shell in
+place of the Installation steps. It provides Python, uv, and PostgreSQL with
+pgvector, and it loads the team's shared development keys from OpenBao, so no
+personal API keys or `.env` are needed.
+
+Before starting, complete the ScottyLabs setup on
+[docs.scottylabs.org](https://docs.scottylabs.org/getting-started.html):
+
+- [Forgejo Setup](https://docs.scottylabs.org/scottylabs/onboarding/forgejo-setup.html)
+  creates a git.cmu.dev account and SSH key.
+- [Contributing](https://docs.scottylabs.org/scottylabs/onboarding/contributing.html)
+  explains how to join a team through
+  [governance](https://git.cmu.dev/ScottyLabs/governance). Join `slai`
+  (`data/teams/slai.toml`), since team membership grants access to the
+  secrets.
+- [Credentials](https://docs.scottylabs.org/scottylabs/platform/credentials.html)
+  describes how ScottyLabs stores secrets in OpenBao. Kennel's
+  [Secrets guide](https://docs.kennel.scottylabs.org/guides/secrets.html)
+  covers the local login and secretspec profiles used below.
+
+Then install the tools:
+
+1. [Nix](https://install.determinate.systems), with the Determinate Systems
+   installer on macOS, Linux, or WSL:
+
+   ```sh
+   curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+   ```
+
+2. [devenv](https://devenv.sh/getting-started/), from a new terminal:
+
+   ```sh
+   nix profile install nixpkgs#devenv
+   ```
+
+3. Optionally, [direnv](https://github.com/direnv/direnv/blob/master/docs/installation.md)
+   with its [shell hook](https://github.com/direnv/direnv/blob/master/docs/hook.md),
+   so the environment loads when you enter the repository.
+
+The shell resolves secrets as it starts and fails without an OpenBao token,
+so log in once per machine first:
+
+```sh
+nix run git+https://git.cmu.dev/ScottyLabs/kennel#login
+```
+
+Then clone the repository and start PostgreSQL and the service together:
+
+```sh
+git clone ssh://forgejo@git.cmu.dev/ScottyLabs/cmugpt-agent.git
+cd cmugpt-agent
+devenv up
+```
+
+The token renews on each shell entry and expires after 90 days without use.
+If the shell fails with an OpenBao or permission error, run the login command
+again. If it still fails, confirm that your git.cmu.dev username is listed in
+`data/teams/slai.toml`. `secretspec check -P dev` reports which secrets
+resolve without printing their values.
 
 ## Configuration
 
