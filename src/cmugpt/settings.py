@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     token_usage_db: str = "/tmp/cmugpt_token_usage.sqlite3"
     port: int = 5055
     # "production" or "prod" makes startup fail without DATABASE_URL and an
-    # AGENT_SHARED_SECRET of at least 32 characters. The prod profile of
-    # secretspec.toml sets it.
+    # AGENT_SHARED_SECRET of at least 32 characters. Unset in every
+    # environment until the prod profile of secretspec.toml sets it again.
     agent_env: str = ""
 
     @property
