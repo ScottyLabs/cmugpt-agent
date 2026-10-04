@@ -25,6 +25,18 @@
 
   cachix.enable = false;
 
+  # semgrep 1.172.0 only accepts pyjwt 2.13.x and the pinned nixpkgs ships
+  # 2.14.0, so semgrep and the devenv shell fail to build. Skipping that
+  # version check is safe: semgrep runs on 2.14.0 unchanged. Delete once
+  # NixOS/nixpkgs#569851 merges and `devenv update` picks it up.
+  overlays = [
+    (_final: prev: {
+      semgrep = prev.semgrep.overridePythonAttrs (old: {
+        pythonRelaxDeps = (old.pythonRelaxDeps or [ ]) ++ [ "pyjwt" ];
+      });
+    })
+  ];
+
   languages.python.package = pkgs.python312;
 
   processes.agent = {
