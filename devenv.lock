@@ -1,5 +1,17 @@
 {
   "nodes": {
+    "build-env": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-d6xi4mKdjkX2JFicDIv5niSzpyI0m/Hnm8GGAIU04kY=",
+        "type": "file",
+        "url": "file:///dev/null"
+      },
+      "original": {
+        "type": "file",
+        "url": "file:///dev/null"
+      }
+    },
     "cachix": {
       "inputs": {
         "devenv": [
@@ -851,6 +863,7 @@
     },
     "scottylabs": {
       "inputs": {
+        "build-env": "build-env",
         "crane": "crane",
         "devenv": "devenv_2",
         "nixpkgs": [
@@ -863,11 +876,11 @@
         "uv2nix": "uv2nix"
       },
       "locked": {
-        "lastModified": 1790402528,
-        "narHash": "sha256-yY49D0h42wqWvE+m09EyvH8TlBdoyhNtQcw6IPCyN+Q=",
+        "lastModified": 1791844206,
+        "narHash": "sha256-T03AhZp3A8nUzAfoJj0qcdSqCbGs3A05o52JA+z8q+Q=",
         "ref": "refs/heads/main",
-        "rev": "577e99c9ffb8a739bdad9188abe6d10084a884e6",
-        "revCount": 371,
+        "rev": "d484da2dcb1e8c69ff0f91efbd854b9391c1ffa1",
+        "revCount": 378,
         "type": "git",
         "url": "https://git.cmu.dev/ScottyLabs/kennel"
       },
