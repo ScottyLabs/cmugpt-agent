@@ -3,12 +3,8 @@
 Thank you for your interest in contributing to Bark. This repository contains
 the agent, the Python service behind the Bark web app. The web app itself is
 maintained in the
-[Surface repository](https://git.cmu.dev/ScottyLabs/cmugpt-surface). The
-project is hosted on
-[git.cmu.dev](https://git.cmu.dev/ScottyLabs/cmugpt-agent). Every pull
-request is checked by CI and deployed as a preview by
-[Kennel](https://git.cmu.dev/ScottyLabs/kennel), the ScottyLabs deployment
-platform. Setup and architecture are described in the [README](README.md).
+[Surface repository](https://git.cmu.dev/ScottyLabs/cmugpt-surface). Setup
+and architecture are described in the [README](README.md).
 
 ## Overview
 
@@ -16,11 +12,11 @@ The contribution process, in outline:
 
 1. For anything larger than a bug fix, start from an issue. Choose an
    existing one from the tracker or open a new one.
-2. Set up a local environment as described in the README.
-3. Make the change on a branch, with tests, and update the README where it
+1. Set up a local environment as described in the README.
+1. Make the change on a branch, with tests, and update the README where it
    is affected.
-4. Write each commit as a single change with a Conventional Commits subject.
-5. Open a pull request against `main`, complete the template, and wait for
+1. Write each commit as a single change with a Conventional Commits subject.
+1. Open a pull request against `main`, complete the template, and wait for
    CI and the preview deployment.
 
 ## What to contribute
@@ -64,7 +60,7 @@ public.
 Follow the [Installation](README.md#installation) section of the README. It
 installs the dependencies with uv, sets up the Postgres database used for
 memory, and creates the `.env` file that holds the API keys. As the README
-notes, the devenv shell is an alternative to installing Postgres by hand. It
+notes, the Nix dev shell is an alternative to installing Postgres by hand. It
 also installs the git hooks that CI runs. Without it, the checks described
 under Checks must be run manually before pushing.
 
@@ -88,7 +84,7 @@ DATABASE_URL="" uv run pytest
 
 An empty `DATABASE_URL` selects the in-memory store in place of Postgres. The
 tests do not require a database, and clearing the variable makes them
-independent of whether Postgres is running. CI runs them the same way.
+independent of whether Postgres is running.
 
 A change in behavior should be accompanied by a unit test that covers it. A
 bug fix should include a test that fails without the fix.
@@ -106,16 +102,10 @@ are skipped when either is missing.
 
 ### Checks
 
-CI runs the git hooks that devenv installs: ruff, ty, treefmt, taplo,
-gitleaks, the Nix linters statix and deadnix, and a check that rejects
-non-ASCII punctuation in text files. It also runs semgrep and osv-scanner.
-With devenv, all of these can be run locally before pushing:
+The dev shell installs the git hooks that CI runs, as described in kennel's
+[local development guide](https://docs.kennel.scottylabs.org/guides/local-development/#git-hooks).
 
-```sh
-devenv shell -- prek run --all-files
-```
-
-Without devenv, run the Python checks locally and leave the rest to CI:
+Without Nix, run the Python checks locally and leave the rest to CI:
 
 ```sh
 uv run ruff check
@@ -260,8 +250,8 @@ all, and the answer should reflect what actually happened. Regardless of the
 level, the author is responsible for every line of the pull request and
 should have read all of it before committing.
 
-Editor and agent state directories (`.claude`, `.cursor`, `.aider*`,
-`.continue`, `.copilot`) are listed in `.gitignore` and should not be
+Editor and agent state directories (`.cursor`, `.aider*`, `.continue`,
+`.copilot`) are listed in `.gitignore` and should not be
 force-added.
 
 ## Opening a pull request
@@ -277,11 +267,10 @@ force-added.
 
 ### After opening
 
-CI runs the hooks and the unit tests. Kennel builds the branch, deploys it as
-a preview, and posts the URL in a comment on the pull request. Each push runs
-the checks again and redeploys the preview, and closing the pull request
-removes it. If a check fails, the CI log identifies the failing line, and
-pushing a fix runs the check again.
+CI runs the hooks and the unit tests, and Kennel deploys the branch as a
+[preview](https://docs.kennel.scottylabs.org/guides/previews/). If a check
+fails, the CI log identifies the failing line, and pushing a fix runs the
+check again.
 
 ### Review
 

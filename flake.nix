@@ -9,90 +9,66 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-
-    pyproject-nix = {
-      url = "github:pyproject-nix/pyproject.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    uv2nix = {
-      url = "github:pyproject-nix/uv2nix";
-      inputs = {
-        pyproject-nix.follows = "pyproject-nix";
-        nixpkgs.follows = "nixpkgs";
-      };
-    };
-
-    pyproject-build-systems = {
-      url = "github:pyproject-nix/build-system-pkgs";
-      inputs = {
-        pyproject-nix.follows = "pyproject-nix";
-        uv2nix.follows = "uv2nix";
-        nixpkgs.follows = "nixpkgs";
-      };
-    };
+    scottylabs.url = "git+https://git.cmu.dev/ScottyLabs/kennel";
+    nixpkgs.follows = "scottylabs/nixpkgs";
+    flake-parts.follows = "scottylabs/flake-parts";
   };
 
   outputs =
-    {
-      nixpkgs,
-      pyproject-nix,
-      uv2nix,
-      pyproject-build-systems,
-      ...
-    }:
-    let
-      inherit (nixpkgs) lib;
-      supportedSystems = [
+    inputs:
+    inputs.flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.scottylabs.flakeModules.default ];
+      systems = [
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
-      forAllSystems = lib.genAttrs supportedSystems;
 
-      # The whole dependency graph (including this project itself) resolved
-      # straight from uv.lock, so it can never drift out of sync the way a
-      # hand-maintained propagatedBuildInputs list did.
-      workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
-
-      overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
-
-      pythonSets = forAllSystems (
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python312; }).overrideScope (
-          lib.composeManyExtensions [
-            pyproject-build-systems.overlays.wheel
-            overlay
-          ]
-        )
-      );
-
-      mkCmugptAgent =
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-          venv = pythonSets.${system}.mkVirtualEnv "cmugpt-agent-env" workspace.deps.default;
-        in
-        pkgs.runCommand "cmugpt-agent" { meta.mainProgram = "cmugpt-agent"; } ''
-          mkdir -p $out/bin
-          ln -s ${venv}/bin/cmugpt-agent $out/bin/cmugpt-agent
-        '';
-    in
-    {
-      packages = forAllSystems (
-        system:
-        let
-          cmugptAgent = mkCmugptAgent system;
-        in
+      perSystem =
         {
-          agent = cmugptAgent;
-          default = cmugptAgent;
-        }
-      );
+          pkgs,
+          lib,
+          helpers,
+          ...
+        }:
+        {
+          scottylabs = {
+            project.name = "cmugpt-agent";
+
+            # the agent runs CREATE EXTENSION vector on setup
+            postgres = {
+              enable = true;
+              extensions = e: [
+                e.pg_uuidv7
+                e.pgvector
+              ];
+            };
+
+            python = {
+              enable = true;
+              package = pkgs.python312;
+            };
+
+            processes.agent = {
+              run = "PORT=5055 exec secretspec run -P dev -- uv run cmugpt-agent";
+              ready = "${lib.getExe pkgs.curl} -sf http://localhost:5055/api/health";
+              depends = [ "postgres-setup" ];
+            };
+
+            shell.hook = ''
+              [ -f "$SCOTTYLABS_ROOT/.env" ] || touch "$SCOTTYLABS_ROOT/.env"
+            '';
+          };
+
+          services.agent = {
+            package = lib.addMetaAttrs { mainProgram = "cmugpt-agent"; } (
+              helpers.buildPythonService {
+                src = ./.;
+                python = pkgs.python312;
+              }
+            );
+            customDomain = "api.cmugpt-agent.scottylabs.org";
+          };
+        };
     };
 }

@@ -1,7 +1,7 @@
 """Assembles the FastAPI application: lifespan, CORS, error envelope, routers."""
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -49,7 +49,7 @@ def _validate_runtime_configuration() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
     """Open the memory store on startup and close it on shutdown.
 
     Shutdown waits for background memory writes to finish before closing.

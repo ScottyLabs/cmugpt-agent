@@ -53,22 +53,22 @@ A request passes through five stages.
    a hashed user identifier. Before any model call, the service enforces
    request size limits, checks the user's daily token budget, and screens the
    message with OpenAI's moderation endpoint.
-2. Planning. `planning.py` determines what the turn requires. It decides
+1. Planning. `planning.py` determines what the turn requires. It decides
    which tool groups to bind, whether the `remember` and `forget` tools are
    needed, and whether memory recall should run. Conversational messages bind
    no data tools. The map tool is bound on every turn unless the user has
    disabled maps, because the model decides whether a map belongs in the
    answer.
-3. Execution. `graph.py` runs a LangGraph graph. It recalls relevant facts
+1. Execution. `graph.py` runs a LangGraph graph. It recalls relevant facts
    about the user, invokes the model, executes any tool calls, and repeats
    until the model produces a final answer. Tool output is wrapped as
    untrusted data so that it cannot inject instructions.
-4. Verification. `guards.py` and the `maps/` package check the finished
+1. Verification. `guards.py` and the `maps/` package check the finished
    answer without a model. The model's map selection is validated against the
    building catalog, and incorrect claims that a lookup failed are repaired.
    Secrets and system prompt text are removed, and tool usage is disclosed
    accurately.
-5. Delivery. The answer is streamed to the Surface as Server-Sent Events.
+1. Delivery. The answer is streamed to the Surface as Server-Sent Events.
    Once the answer is complete, a background task extracts durable facts
    about the user from the exchange and stores them for future turns.
 
@@ -121,16 +121,15 @@ cmugpt-agent/
 ├── evals/                      # Live evaluations, run manually
 │
 ├── pyproject.toml              # Dependencies, entry point, tool configuration
-├── devenv.nix                  # Local environment and Kennel settings
-├── flake.nix                   # Nix build
+├── flake.nix                   # Nix build, dev shell, and Kennel settings
 ├── secretspec.toml             # Secret declarations
 └── .env.example                # Environment variable template
 ```
 
 ## Requirements
 
-You will need the following, or Nix and devenv in their place (see
-Installation with devenv):
+You will need the following, or Nix in their place (see
+Installation with Nix):
 
 - [Git](https://git-scm.com/downloads).
 - [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs
@@ -156,16 +155,16 @@ production. The service also starts without `OPENAI_API_KEY` or
    uv sync
    ```
 
-2. Create the memory database. Install
+1. Create the memory database. Install
    [PostgreSQL](https://www.postgresql.org/download/) and the
    [pgvector extension](https://github.com/pgvector/pgvector#installation),
    then create an empty database named `cmugpt_agent`. The service creates
    the pgvector extension, its schema, and its tables on first start. If you
-   prefer not to install PostgreSQL by hand, the [devenv](https://devenv.sh)
-   shell defined in `devenv.nix` provides a database with pgvector already
-   set up (see Installation with devenv).
+   prefer not to install PostgreSQL by hand, the dev shell defined in
+   `flake.nix` provides a database with pgvector already set up (see
+   Installation with Nix).
 
-3. Create the environment file and add the API keys.
+1. Create the environment file and add the API keys.
 
    ```sh
    cp .env.example .env
@@ -182,67 +181,30 @@ production. The service also starts without `OPENAI_API_KEY` or
    production MCP server and at the `cmugpt_agent` database on the local
    default socket.
 
-## Installation with devenv
+## Installation with Nix
 
-Members of the `slai` team can use the [devenv](https://devenv.sh) shell in
-place of the Installation steps. It provides Python, uv, and PostgreSQL with
-pgvector, and it loads the team's shared development keys from OpenBao, so no
-personal API keys or `.env` are needed.
+Members of the `slai` team can use the Nix dev shell in place of the
+Installation steps. It provides Python, uv, and PostgreSQL with pgvector, and
+it loads the team's shared development keys from OpenBao, so no personal API
+keys or `.env` are needed.
 
-Before starting, complete the ScottyLabs setup on
-[docs.scottylabs.org](https://docs.scottylabs.org/getting-started.html):
-
-- [Forgejo Setup](https://docs.scottylabs.org/scottylabs/onboarding/forgejo-setup.html)
-  creates a git.cmu.dev account and SSH key.
-- [Contributing](https://docs.scottylabs.org/scottylabs/onboarding/contributing.html)
-  explains how to join a team through
-  [governance](https://git.cmu.dev/ScottyLabs/governance). Join `slai`
-  (`data/teams/slai.toml`), since team membership grants access to the
-  secrets.
-- [Credentials](https://docs.scottylabs.org/scottylabs/platform/credentials.html)
-  describes how ScottyLabs stores secrets in OpenBao. Kennel's
-  [Secrets guide](https://docs.kennel.scottylabs.org/guides/secrets.html)
-  covers the local login and secretspec profiles used below.
-
-Then install the tools:
-
-1. [Nix](https://install.determinate.systems), with the Determinate Systems
-   installer on macOS, Linux, or WSL:
-
-   ```sh
-   curl -fsSL https://install.determinate.systems/nix | sh -s -- install
-   ```
-
-2. [devenv](https://devenv.sh/getting-started/), from a new terminal:
-
-   ```sh
-   nix profile install nixpkgs#devenv
-   ```
-
-3. Optionally, [direnv](https://github.com/direnv/direnv/blob/master/docs/installation.md)
-   with its [shell hook](https://github.com/direnv/direnv/blob/master/docs/hook.md),
-   so the environment loads when you enter the repository.
-
-The shell resolves secrets as it starts and fails without an OpenBao token,
-so log in once per machine first:
-
-```sh
-nix run git+https://git.cmu.dev/ScottyLabs/kennel#login
-```
-
-Then clone the repository and start PostgreSQL and the service together:
+[Join `slai` through governance](https://git.cmu.dev/ScottyLabs/governance#joining-a-team),
+since team membership grants access to the secrets. Then install Lix and log in
+to OpenBao by following kennel's
+[local development](https://docs.kennel.scottylabs.org/guides/local-development/#installing-nix)
+and [secrets](https://docs.kennel.scottylabs.org/guides/secrets/#local-development)
+guides, clone the repository, enter the dev shell, and start PostgreSQL and the
+service together:
 
 ```sh
 git clone ssh://forgejo@git.cmu.dev/ScottyLabs/cmugpt-agent.git
 cd cmugpt-agent
-devenv up
+nix develop
+pitchfork start --local
 ```
 
-The token renews on each shell entry and expires after 90 days without use.
-If the shell fails with an OpenBao or permission error, run the login command
-again. If it still fails, confirm that your git.cmu.dev username is listed in
-`data/teams/slai.toml`. `secretspec check -P dev` reports which secrets
-resolve without printing their values.
+If secrets fail to load after logging in, confirm that your Andrew ID is listed
+in `data/teams/slai.yaml` in governance.
 
 ## Configuration
 
@@ -263,10 +225,8 @@ All configuration is read from environment variables by `settings.py`, and
 | `MEMORY_EXTRACTION_MODEL` | Model for background fact extraction. Default `qwen/qwen3.7-flash` |
 | `TOKEN_USAGE_DB` | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
 
-Production does not read `.env`. Kennel injects `DATABASE_URL` for its managed
-PostgreSQL instance, the API keys and `MCP_SERVER_URL` are resolved from
-OpenBao, and `AGENT_SHARED_SECRET` is set so that only the Surface can call
-the service. See Deployment.
+Production does not read `.env`, and `AGENT_SHARED_SECRET` is set there so that
+only the Surface can call the service. See Deployment.
 
 ## Running the service
 
@@ -364,20 +324,14 @@ uv run ty check       # type check
 
 ## Deployment
 
-Production runs on [Kennel](https://git.cmu.dev/ScottyLabs/kennel), the
-ScottyLabs deployment platform. Kennel builds the `agent` package defined in
-`flake.nix` and runs its `cmugpt-agent` entry point as a systemd unit. `PORT`,
-`DATABASE_URL`, and the secrets from the `prod` profile of `secretspec.toml`
-are injected as environment variables. That profile sets
+Production runs on [Kennel](https://docs.kennel.scottylabs.org/guides/deploying/),
+which deploys the `agent` package defined in `flake.nix` with the secrets from
+the `prod` profile of `secretspec.toml`. That profile sets
 `AGENT_ENV=production`, so the service refuses to start without `DATABASE_URL`
-and an `AGENT_SHARED_SECRET` of at least 32 characters. Pushes to `main` on
-git.cmu.dev trigger a deployment, and each pull request receives a preview
-deployment.
+and an `AGENT_SHARED_SECRET` of at least 32 characters.
 
 - <https://api.cmugpt-agent.scottylabs.org> (custom domain)
 - <https://cmugpt-agent-agent-main.scottylabs.net> (default Kennel URL)
-
-Production secrets are stored in OpenBao and managed with secretspec.
 
 ## Contributing
 

@@ -7,24 +7,5 @@ on:
     branches: [main]
 
 jobs:
-  check:
-    uses: ScottyLabs/kennel/.forgejo/workflows/ci.yml@main
-    secrets: inherit
-
-  test-agent:
-    needs: check
-    runs-on: native
-    env:
-      SECRETSPEC_PROFILE: ci
-      SECRETSPEC_PROVIDER: env
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-    steps:
-      - uses: https://code.forgejo.org/actions/checkout@v7
-      - uses: https://git.cmu.dev/ScottyLabs/kennel/.forgejo/actions/prepare@main
-
-      - name: Test
-        # devenv exports DATABASE_URL on shell entry but CI runs no postgres.
-        # Blank it so tests use the in-memory store.
-        run: devenv shell -- sh -c 'DATABASE_URL="" uv run pytest'
+  checks:
+    uses: ScottyLabs/kennel/.forgejo/workflows/checks.yml@main

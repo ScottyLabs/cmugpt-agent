@@ -18,28 +18,16 @@ wheels/
 # Environment Keys
 .env
 
-# Nix / devenv
-.devenv/
-.devenv.flake.nix
+# Nix
 .pre-commit-config.yaml
 result
 result-*
 
 # AI
-.mcp.json
-.claude
 .cursor/
 .aider*
 .continue/
 .copilot/
 
-# direnv
-.direnv/
-
-# Rust
-target/
-.cargo/
-
 # OS
 .DS_Store
-rustc-ice-*.txt

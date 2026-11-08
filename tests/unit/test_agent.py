@@ -5,7 +5,7 @@ scripts in tests/live exercise the real services.
 """
 
 import os
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from http import HTTPStatus
 from typing import Any
@@ -26,7 +26,7 @@ from cmugpt.schema import ActionType, AgentResponse, Thought, UserInput
 
 
 @contextmanager
-def temporary_env(name: str, value: str | None) -> Iterator[None]:
+def temporary_env(name: str, value: str | None) -> Generator[None]:
     original = os.environ.get(name)
     if value is None:
         os.environ.pop(name, None)
