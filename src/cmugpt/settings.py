@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     database_url: str = ""
     # Comma-separated browser origins allowed by CORS.
     allowed_origins: str = "https://cmugpt.com"
+    # Comma-separated OpenRouter models a caller may request. Requests naming
+    # any other model are rejected, so a caller cannot choose an expensive
+    # model. Keep in sync with AGENT_MODELS in the Surface.
+    allowed_models: str = (
+        "openai/gpt-5.6-luna,deepseek/deepseek-v4-pro,minimax/minimax-m3,"
+        "z-ai/glm-5.2,google/gemini-3.5-flash-lite"
+    )
     title_model: str = "qwen/qwen3.7-flash"
     memory_extraction_model: str = "qwen/qwen3.7-flash"
     # SQLite file that stores the per-user daily token budget.
@@ -54,6 +61,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.agent_env.strip().lower() in _PRODUCTION_VALUES
+
+    @property
+    def allowed_model_list(self) -> list[str]:
+        return [m.strip() for m in self.allowed_models.split(",") if m.strip()]
 
     @property
     def allowed_origin_list(self) -> list[str]:

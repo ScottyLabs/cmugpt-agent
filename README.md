@@ -219,6 +219,7 @@ All configuration is read from environment variables by `settings.py`, and
 | `MCP_SERVER_URL` | Base URL of the CMU MCP server, including the `/mcp` path |
 | `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, `/agent/*` and `/memory/*` refuse every request with HTTP 503 |
 | `AGENT_ALLOW_UNAUTHENTICATED` | Set to `1` to accept requests without `AGENT_SHARED_SECRET`, for local development only. Production refuses to start with it set |
+| `ALLOWED_MODELS` | Comma-separated OpenRouter models a request may name; others get HTTP 400. Defaults to the Surface's model list, and must be updated with it |
 | `AGENT_ENV` | `production` makes startup fail without `DATABASE_URL` and an `AGENT_SHARED_SECRET` of at least 32 characters. The `prod` profile of `secretspec.toml` sets it |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
 | `PORT` | Listening port. Default `5055` |

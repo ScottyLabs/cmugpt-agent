@@ -19,6 +19,7 @@ from cmugpt.moderation import (
     redacted_output_response,
 )
 from cmugpt.schema import UserInput
+from cmugpt.settings import get_settings
 from cmugpt.title import generate_chat_title
 from cmugpt.token_limits import DailyTokenLimitError, ensure_within_daily_limit
 
@@ -129,6 +130,11 @@ def _parse_request(
 
     raw_model = _optional("model")
     model = raw_model if isinstance(raw_model, str) else None
+    if model is not None and model not in get_settings().allowed_model_list:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="'model' is not an allowed model.",
+        )
 
     message_history = _optional("message_history")
     if message_history is not None and not isinstance(message_history, list):

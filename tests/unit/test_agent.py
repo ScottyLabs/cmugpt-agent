@@ -106,7 +106,7 @@ def test_agent_respond_accepts_supported_payload_shapes(
                 "context": {"previous_location": "CUC"},
                 "user_id": "ci-user",
             },
-            "model": "openai/gpt-4o-mini",
+            "model": "z-ai/glm-5.2",
             "message_history": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "hi"},
@@ -226,6 +226,23 @@ def test_missing_shared_secret_fails_closed(client: TestClient) -> None:
     assert_equal(
         blocked.status_code, HTTPStatus.SERVICE_UNAVAILABLE, "opt-in ignored in prod"
     )
+
+
+def test_agent_respond_rejects_unlisted_models(client: TestClient) -> None:
+    allowed = client.post(
+        "/agent/respond", json={"query": "Hi", "model": "z-ai/glm-5.2"}
+    )
+    default = client.post("/agent/respond", json={"query": "Hi"})
+    expensive = client.post(
+        "/agent/respond", json={"query": "Hi", "model": "openai/o1-pro"}
+    )
+    streamed = client.post(
+        "/agent/respond/stream", json={"query": "Hi", "model": "openai/o1-pro"}
+    )
+    assert_equal(allowed.status_code, HTTPStatus.OK, "allowed model")
+    assert_equal(default.status_code, HTTPStatus.OK, "default model")
+    assert_equal(expensive.status_code, HTTPStatus.BAD_REQUEST, "unlisted model")
+    assert_equal(streamed.status_code, HTTPStatus.BAD_REQUEST, "unlisted stream model")
 
 
 def test_production_rejects_unauthenticated_opt_in() -> None:
