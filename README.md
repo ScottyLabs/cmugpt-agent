@@ -217,7 +217,8 @@ All configuration is read from environment variables by `settings.py`, and
 | `OPENAI_API_KEY` | Embeddings for memory search and the moderation endpoint. Unset, recall orders facts by recency and moderation is skipped |
 | `DATABASE_URL` | PostgreSQL connection string. Unset, memory lives in an in-memory store that is cleared on restart |
 | `MCP_SERVER_URL` | Base URL of the CMU MCP server, including the `/mcp` path |
-| `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, requests are unauthenticated. Set in production |
+| `AGENT_SHARED_SECRET` | Bearer token the Surface presents on every request. Unset, `/agent/*` and `/memory/*` refuse every request with HTTP 503 |
+| `AGENT_ALLOW_UNAUTHENTICATED` | Set to `1` to accept requests without `AGENT_SHARED_SECRET`, for local development only. Production refuses to start with it set |
 | `AGENT_ENV` | `production` makes startup fail without `DATABASE_URL` and an `AGENT_SHARED_SECRET` of at least 32 characters. The `prod` profile of `secretspec.toml` sets it |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins for CORS. Default `https://cmugpt.com` |
 | `PORT` | Listening port. Default `5055` |
@@ -254,8 +255,11 @@ store cannot be queried, the endpoint returns HTTP 503 with
 
 ## API
 
-When `AGENT_SHARED_SECRET` is set, every route except `/api/health` requires
-the header `Authorization: Bearer <secret>`.
+Every route except `/api/health` requires the header
+`Authorization: Bearer <secret>` matching `AGENT_SHARED_SECRET`. Without a
+secret those routes return HTTP 503, unless `AGENT_ALLOW_UNAUTHENTICATED=1` is
+set for local development. Staging and preview deployments therefore need the
+secret too.
 
 | Route | Description |
 | --- | --- |

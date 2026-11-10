@@ -26,6 +26,8 @@ def _validate_runtime_configuration() -> None:
     settings = get_settings()
     if not settings.is_production:
         return
+    if settings.agent_allow_unauthenticated:
+        raise RuntimeError("AGENT_ALLOW_UNAUTHENTICATED cannot be set in production.")
     required = {
         "DATABASE_URL": settings.database_url,
         "AGENT_SHARED_SECRET": settings.agent_shared_secret,
@@ -55,11 +57,18 @@ async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
     Shutdown waits for background memory writes to finish before closing.
     """
     _validate_runtime_configuration()
-    if not get_settings().agent_shared_secret:
-        logger.warning(
-            "AGENT_SHARED_SECRET is not set: /agent/respond* and /memory/* "
-            "are UNAUTHENTICATED. This is only acceptable in local dev."
-        )
+    settings = get_settings()
+    if not settings.agent_shared_secret:
+        if settings.agent_allow_unauthenticated:
+            logger.warning(
+                "AGENT_ALLOW_UNAUTHENTICATED is set: /agent/* and /memory/* "
+                "accept requests without a bearer token. Local development only."
+            )
+        else:
+            logger.error(
+                "AGENT_SHARED_SECRET is not set: /agent/* and /memory/* will "
+                "refuse every request until it is configured."
+            )
     await setup_store()
     try:
         yield

@@ -14,20 +14,28 @@ from cmugpt.settings import get_settings
 _MAX_BODY_BYTES = 256 * 1024
 
 
-# Shared-secret authentication for the agent and memory routers. When
-# AGENT_SHARED_SECRET is set, every request to them must carry a matching
-# bearer token. auto_error=False stops HTTPBearer from raising its own 403, so
-# a missing header reaches require_shared_secret and gets the standard error
-# envelope.
+# Shared-secret authentication for the agent and memory routers. Every request
+# to them must carry a bearer token matching AGENT_SHARED_SECRET. Without a
+# secret the routes fail closed, unless AGENT_ALLOW_UNAUTHENTICATED opts in for
+# local development, so a deployment that forgets the secret is unusable rather
+# than open to the internet. auto_error=False stops HTTPBearer from raising its
+# own 403, so a missing header reaches require_shared_secret and gets the
+# standard error envelope.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def require_shared_secret(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008 - Depends() as a default is FastAPI's convention
 ) -> None:
-    expected = get_settings().agent_shared_secret
+    settings = get_settings()
+    expected = settings.agent_shared_secret
     if not expected:
-        return  # Auth is disabled, which only local development should do.
+        if settings.agent_allow_unauthenticated and not settings.is_production:
+            return
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured.",
+        )
     token_ok = (
         creds is not None
         and creds.scheme.lower() == "bearer"

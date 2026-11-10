@@ -66,9 +66,10 @@ under Checks must be run manually before pushing.
 
 The service listens on port 5055. To exercise a change through the web app,
 run Surface locally with `AGENT_API_URL` set to `http://127.0.0.1:5055` and
-the same `AGENT_SHARED_SECRET` in both `.env` files. The secret may be left
-empty on both sides for local use, in which case authentication is skipped.
-Production refuses an empty secret.
+the same `AGENT_SHARED_SECRET` in both `.env` files. For local use the secret
+may be left empty on both sides if `AGENT_ALLOW_UNAUTHENTICATED=1` is set in
+the agent's `.env`; otherwise the agent refuses requests. Production refuses
+an empty secret and the opt-in.
 
 ## Making your change
 

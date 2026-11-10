@@ -30,9 +30,13 @@ class Settings(BaseSettings):
     # text-embedding-3-large (memory search) and the moderation endpoint.
     # When unset, recall falls back to recency order and moderation is skipped.
     openai_api_key: str = ""
-    # Bearer token the Surface server presents on every request. Empty disables
-    # authentication, which is acceptable only in local development.
+    # Bearer token the Surface server presents on every request. When empty,
+    # the protected routes refuse every request unless
+    # AGENT_ALLOW_UNAUTHENTICATED is set.
     agent_shared_secret: str = ""
+    # Opt-in for running without AGENT_SHARED_SECRET, for local development
+    # only. Production refuses to start with it set.
+    agent_allow_unauthenticated: bool = False
     # Postgres with pgvector. Empty means the in-memory store.
     database_url: str = ""
     # Comma-separated browser origins allowed by CORS.

@@ -75,8 +75,10 @@ async def fake_run_agent(
 @pytest.fixture(autouse=True)
 def _no_shared_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     # Keep the suite independent of a developer's local .env. The dedicated
-    # shared-secret test below sets and verifies authentication explicitly.
+    # shared-secret tests below set and verify authentication explicitly.
     monkeypatch.delenv("AGENT_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("AGENT_ENV", raising=False)
+    monkeypatch.setenv("AGENT_ALLOW_UNAUTHENTICATED", "1")
 
 
 @pytest.fixture
@@ -204,7 +206,47 @@ def test_agent_respond_enforces_shared_secret(client: TestClient) -> None:
     assert_equal(authorized.status_code, HTTPStatus.OK, "authorized status")
 
 
-def test_production_requires_database_and_shared_secret() -> None:
+def test_missing_shared_secret_fails_closed(client: TestClient) -> None:
+    with temporary_env("AGENT_ALLOW_UNAUTHENTICATED", None):
+        respond = client.post("/agent/respond", json={"query": "Hi"})
+        memory = client.get("/memory/oidc-abc")
+        health = client.get("/api/health")
+    assert_equal(
+        respond.status_code, HTTPStatus.SERVICE_UNAVAILABLE, "respond without secret"
+    )
+    assert_equal(
+        memory.status_code, HTTPStatus.SERVICE_UNAVAILABLE, "memory without secret"
+    )
+    assert_equal(health.status_code, HTTPStatus.OK, "health stays public")
+
+    # The development opt-in never applies in production, even if the
+    # startup check were bypassed.
+    with temporary_env("AGENT_ENV", "production"):
+        blocked = client.post("/agent/respond", json={"query": "Hi"})
+    assert_equal(
+        blocked.status_code, HTTPStatus.SERVICE_UNAVAILABLE, "opt-in ignored in prod"
+    )
+
+
+def test_production_rejects_unauthenticated_opt_in() -> None:
+    with (
+        temporary_env("AGENT_ENV", "production"),
+        temporary_env("DATABASE_URL", "postgresql://example.invalid/cmugpt"),
+        temporary_env("AGENT_SHARED_SECRET", "s" * 32),
+        temporary_env("AGENT_ALLOW_UNAUTHENTICATED", "1"),
+    ):
+        try:
+            app_module._validate_runtime_configuration()
+        except RuntimeError as exc:
+            assert_true("AGENT_ALLOW_UNAUTHENTICATED" in str(exc), "opt-in is reported")
+        else:
+            raise AssertionError("production starts with auth opt-out")
+
+
+def test_production_requires_database_and_shared_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENT_ALLOW_UNAUTHENTICATED", raising=False)
     with (
         temporary_env("AGENT_ENV", "production"),
         temporary_env("DATABASE_URL", None),
