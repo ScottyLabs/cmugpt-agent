@@ -26,12 +26,10 @@ def _build(
 ) -> ChatOpenAI:
     extra: dict[str, Any] = {}
     if stream_usage:
-        # The final streamed chunk then carries measured token counts, which
-        # the daily budget records instead of an estimate from text length.
+        # The final streamed chunk then carries measured token counts, which the daily budget records instead of an estimate from text length.
         extra["stream_usage"] = True
     if reasoning_off:
-        # Reasoning models emit a thinking phase before the answer. Callers that
-        # need a one-line reply, such as title generation, disable it.
+        # Reasoning models emit a thinking phase before the answer. Callers that need a one-line reply, such as title generation, disable it.
         extra["extra_body"] = {"reasoning": {"enabled": False}}
     return ChatOpenAI(
         model=model,

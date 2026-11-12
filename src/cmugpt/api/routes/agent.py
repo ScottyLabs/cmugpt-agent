@@ -28,9 +28,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", dependencies=[Depends(require_shared_secret)])
 
-# Upper bounds on request input. Query and history text is sent to the
-# model, where longer input costs more tokens, and user_id becomes each
-# user's storage namespace, so none of these values may arrive unbounded.
+# Upper bounds on request input. Query and history text is sent to the model, where longer input costs more tokens, and user_id becomes each user's storage namespace, so none of these values may arrive unbounded.
 _MAX_QUERY_CHARS = 8_000
 _MAX_USER_ID_CHARS = 128
 _MAX_HISTORY_MESSAGES = 40
@@ -58,10 +56,7 @@ def _normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     user_id = candidate.get("user_id")
     if user_id is not None and not isinstance(user_id, str):
         raise ValueError("'user_id' must be a string if provided.")
-    # user_id becomes the key that separates one user's stored memory from
-    # another's, and the database matches it as a pattern rather than
-    # literally. Characters with special meaning there must be excluded, so
-    # is_valid_user_id enforces a strict allowlist.
+    # user_id becomes the key that separates one user's stored memory from another's, and the database matches it as a pattern rather than literally. Characters with special meaning there must be excluded, so is_valid_user_id enforces a strict allowlist.
     if user_id is not None and not is_valid_user_id(user_id):
         raise ValueError(
             "'user_id' must match [A-Za-z0-9@:+=~-] and be at most "
@@ -108,8 +103,7 @@ def _parse_request(
             detail="Request body must be a JSON object.",
         )
 
-    # Optional fields may appear inside the {"data": {...}} wrapper or at
-    # the top level beside it. Callers use both shapes.
+    # Optional fields may appear inside the {"data": {...}} wrapper or at the top level beside it. Callers use both shapes.
     wrapper: Any = payload.get("data", payload)
     if not isinstance(wrapper, Mapping):
         wrapper = payload
@@ -142,8 +136,7 @@ def _parse_request(
             detail=f"'message_history' must have at most {_MAX_HISTORY_ITEMS} items.",
         )
     if isinstance(message_history, list):
-        # Accept user/assistant/system at the boundary. The agent strips
-        # `system` defensively. Surface clients keep `system` rows in their
+        # Accept user/assistant/system at the boundary. The agent strips `system` defensively. Surface clients keep `system` rows in their
         # DB schema, so rejecting them here would break production.
         valid_history = all(
             isinstance(item, Mapping)
@@ -160,10 +153,7 @@ def _parse_request(
                     "'content' field."
                 ),
             )
-        # History is sent to the model as-is, so both the number of turns
-        # and the size of each message are capped to keep one request from
-        # carrying an unbounded token cost. Oversized history is trimmed, the
-        # way a context window truncates, so the request still succeeds.
+        # History is sent to the model as-is, so both the number of turns and the size of each message are capped to keep one request from carrying an unbounded token cost. Oversized history is trimmed, the way a context window truncates, so the request still succeeds.
         message_history = [
             {
                 "role": str(item["role"]),
@@ -321,10 +311,8 @@ async def agent_respond_stream(request: Request) -> StreamingResponse:
                 yield _sse("done", blocked.model_dump()).encode("utf-8")
                 return
 
-            # The done payload is held back until the finished reply passes an
-            # output check: deltas have already streamed, but done is what the
-            # Surface persists and re-renders, so redacting it retroactively
-            # scrubs the reply everywhere that outlives the stream.
+            # The done payload is held back until the finished reply passes an output check: deltas have already streamed, but done is what the
+            # Surface persists and re-renders, so redacting it retroactively scrubs the reply everywhere that outlives the stream.
             final_payload: dict[str, Any] | None = None
             async for event_name, data in stream_agent_response(
                 user_input=user_input,

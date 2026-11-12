@@ -20,8 +20,7 @@ from .settings import get_settings
 # Total tokens (input + output) one user may spend per UTC day.
 DAILY_TOKEN_LIMIT = 1_000_000
 
-# Requests without a user_id share a single counter. The Surface always
-# supplies one.
+# Requests without a user_id share a single counter. The Surface always supplies one.
 _ANONYMOUS_KEY = "anonymous"
 
 
@@ -48,8 +47,7 @@ class DailyTokenLimitError(Exception):
 
 
 def _db_path() -> str:
-    # Loss of the default file on redeploy resets accumulated usage. The
-    # failure mode is therefore under-counting, never a spurious block.
+    # Loss of the default file on redeploy resets accumulated usage. The failure mode is therefore under-counting, never a spurious block.
     return get_settings().token_usage_db
 
 

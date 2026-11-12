@@ -70,10 +70,7 @@ async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
 
 app = FastAPI(lifespan=_lifespan)
 
-# CORS restricts only browser JavaScript running on another origin. It has no
-# effect on direct requests from curl, scripts, or servers, so the bearer
-# secret in deps.py is the access boundary. CORS exists to keep a malicious
-# page from making a visitor's browser call this API.
+# CORS restricts only browser JavaScript running on another origin. It has no effect on direct requests from curl, scripts, or servers, so the bearer secret in deps.py is the access boundary. CORS exists to keep a malicious page from making a visitor's browser call this API.
 _allowed_origins = get_settings().allowed_origin_list
 app.add_middleware(
     CORSMiddleware,
@@ -99,8 +96,7 @@ app.include_router(memory.router)
 
 
 def main() -> None:
-    # Uvicorn configures only its own loggers. Configure the root logger so
-    # the application's cmugpt.* loggers emit too.
+    # Uvicorn configures only its own loggers. Configure the root logger so the application's cmugpt.* loggers emit too.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

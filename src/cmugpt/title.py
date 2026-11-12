@@ -41,9 +41,7 @@ async def generate_chat_title(first_message: str) -> str | None:
     text = first_message.strip()
     if not get_settings().openrouter_api_key or not text:
         return None
-    # A flagged first message must not be echoed into a title. "New chat" is
-    # the surface's default title, so returning it both neutralizes the title
-    # and lets the next allowed message claim it.
+    # A flagged first message must not be echoed into a title. "New chat" is the surface's default title, so returning it both neutralizes the title and lets the next allowed message claim it.
     verdict = await moderate_text(text)
     if verdict.action != ALLOW:
         return "New chat"

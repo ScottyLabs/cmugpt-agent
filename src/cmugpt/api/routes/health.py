@@ -16,10 +16,7 @@ _ready_cache: tuple[float, bool] | None = None
 
 @router.get("/api/health")
 async def health() -> JSONResponse:
-    # The memory block reports which backend this deployment is using and
-    # whether it is answering queries. The readiness probe runs a real store
-    # query, so the result is cached briefly to keep this unauthenticated
-    # endpoint from generating database load.
+    # The memory block reports which backend this deployment is using and whether it is answering queries. The readiness probe runs a real store query, so the result is cached briefly to keep this unauthenticated endpoint from generating database load.
     global _ready_cache
     now = time.monotonic()
     if _ready_cache is not None and now - _ready_cache[0] < _READY_TTL_SECONDS:

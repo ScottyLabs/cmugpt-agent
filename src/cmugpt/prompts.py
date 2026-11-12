@@ -14,8 +14,7 @@ from collections.abc import Iterable
 
 from langchain_core.tools import BaseTool
 
-# Interpolated below so that the output guard's echo allowlist cannot drift
-# from what the prompt actually instructs the model to say.
+# Interpolated below so that the output guard's echo allowlist cannot drift from what the prompt actually instructs the model to say.
 from .guards import (
     CRISIS_RESOURCES_LINE,
     GENERAL_INFO_QUALIFIER,
@@ -26,10 +25,7 @@ from .maps.buildings import CURATED_NICKNAMES, LOCATION_ID_TO_LABEL
 from .mcp_tools import disabled_group_labels, normalize_disabled_groups, tool_group
 from .memory import is_internal_memory_tool
 
-# Substrings identifying a tool as capable of returning a route between two
-# points rather than locating a single building. Matched against tool names
-# so the prompt, and the tool failure notice in graph.py, adapt to whatever
-# the MCP server exposes.
+# Substrings identifying a tool as capable of returning a route between two points rather than locating a single building. Matched against tool names so the prompt, and the tool failure notice in graph.py, adapt to whatever the MCP server exposes.
 _ROUTING_TOOL_HINTS = ("path", "route", "direction", "distance", "navigat")
 
 
@@ -204,17 +200,14 @@ def _variable_sections(
     has_maps_tools = any(
         tool_group(tool.name or "") == "maps" for tool in (tools or [])
     )
-    # If no maps tools are bound and the user did not disable them, the query
-    # is not map-related and routing guidance would be wasted. The
-    # disabled-group warning always stays when the user disabled the group.
+    # If no maps tools are bound and the user did not disable them, the query is not map-related and routing guidance would be wasted. The disabled-group warning always stays when the user disabled the group.
     if maps_enabled and not has_maps_tools:
         directions_section = ""
     else:
         directions_section = _directions_section(_has_routing_tool(tools), maps_enabled)
     disabled_section = _disabled_tools_section(disabled_tools)
     memory_section = _memory_section(_has_memory_tools(tools))
-    # The campus-map rules carry the full building catalog, so they are only
-    # worth their tokens when the show-map tool is actually bound this turn.
+    # The campus-map rules carry the full building catalog, so they are only worth their tokens when the show-map tool is actually bound this turn.
     campus_map_section = _campus_map_section(maps_enabled) if has_maps_tools else ""
 
     return (

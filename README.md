@@ -1,29 +1,15 @@
 # Bark Agent
 
-Bark Agent is the backend service for Bark, the campus assistant for Carnegie
-Mellon University built by ScottyLabs. It receives chat messages from the Bark
-web application and answers them with a language model and a set of campus
-data tools. Each answer is checked for safety and accuracy before it is
-returned, and the service keeps long-term memory for each user.
+Bark Agent is the backend service for Bark, the campus assistant for Carnegie Mellon University built by ScottyLabs. It receives chat messages from the Bark web application and answers them with a language model and a set of campus data tools. Each answer is checked for safety and accuracy before it is returned, and the service keeps long-term memory for each user.
 
 ## Overview
 
 Bark consists of two services.
 
-- The Surface ([cmugpt-surface](https://git.cmu.dev/ScottyLabs/cmugpt-surface))
-  is the web application and its server. It authenticates users, stores chats,
-  and forwards each message to this service.
-- The Agent (this repository) processes each message. It selects the campus
-  tools the question requires, runs a LangGraph agent against models served
-  through OpenRouter, validates the result, and streams the answer back to the
-  Surface.
+- The Surface ([cmugpt-surface](https://git.cmu.dev/ScottyLabs/cmugpt-surface)) is the web application and its server. It authenticates users, stores chats, and forwards each message to this service.
+- The Agent (this repository) processes each message. It selects the campus tools the question requires, runs a LangGraph agent against models served through OpenRouter, validates the result, and streams the answer back to the Surface.
 
-Campus data comes from the CMU MCP server
-([mcp-server](https://git.cmu.dev/ScottyLabs/mcp-server)), which publishes
-tools for maps, courses, dining, and the student guide over the Model
-Context Protocol. OpenAI provides the embeddings used for memory search and
-the moderation endpoint. Per-user memory is stored in PostgreSQL with the
-pgvector extension.
+Campus data comes from the CMU MCP server ([mcp-server](https://git.cmu.dev/ScottyLabs/mcp-server)), which publishes tools for maps, courses, dining, and the student guide over the Model Context Protocol. OpenAI provides the embeddings used for memory search and the moderation endpoint. Per-user memory is stored in PostgreSQL with the pgvector extension.
 
 ```mermaid
 flowchart TB
@@ -49,33 +35,13 @@ flowchart TB
 
 A request passes through five stages.
 
-1. Validation. The Surface posts the message, the prior turns of the chat, and
-   a hashed user identifier. Before any model call, the service enforces
-   request size limits, checks the user's daily token budget, and screens the
-   message with OpenAI's moderation endpoint.
-1. Planning. `planning.py` determines what the turn requires. It decides
-   which tool groups to bind, whether the `remember` and `forget` tools are
-   needed, and whether memory recall should run. Conversational messages bind
-   no data tools. The map tool is bound on every turn unless the user has
-   disabled maps, because the model decides whether a map belongs in the
-   answer.
-1. Execution. `graph.py` runs a LangGraph graph. It recalls relevant facts
-   about the user, invokes the model, executes any tool calls, and repeats
-   until the model produces a final answer. Tool output is wrapped as
-   untrusted data so that it cannot inject instructions.
-1. Verification. `guards.py` and the `maps/` package check the finished
-   answer without a model. The model's map selection is validated against the
-   building catalog, and incorrect claims that a lookup failed are repaired.
-   Secrets and system prompt text are removed, and tool usage is disclosed
-   accurately.
-1. Delivery. The answer is streamed to the Surface as Server-Sent Events.
-   Once the answer is complete, a background task extracts durable facts
-   about the user from the exchange and stores them for future turns.
+1. Validation. The Surface posts the message, the prior turns of the chat, and a hashed user identifier. Before any model call, the service enforces request size limits, checks the user's daily token budget, and screens the message with OpenAI's moderation endpoint.
+1. Planning. `planning.py` determines what the turn requires. It decides which tool groups to bind, whether the `remember` and `forget` tools are needed, and whether memory recall should run. Conversational messages bind no data tools. The map tool is bound on every turn unless the user has disabled maps, because the model decides whether a map belongs in the answer.
+1. Execution. `graph.py` runs a LangGraph graph. It recalls relevant facts about the user, invokes the model, executes any tool calls, and repeats until the model produces a final answer. Tool output is wrapped as untrusted data so that it cannot inject instructions.
+1. Verification. `guards.py` and the `maps/` package check the finished answer without a model. The model's map selection is validated against the building catalog, and incorrect claims that a lookup failed are repaired. Secrets and system prompt text are removed, and tool usage is disclosed accurately.
+1. Delivery. The answer is streamed to the Surface as Server-Sent Events. Once the answer is complete, a background task extracts durable facts about the user from the exchange and stores them for future turns.
 
-Memory holds only the facts extracted from conversations and the facts a
-user explicitly asks Bark to remember. Raw chat turns are never stored. A
-user can view and delete their facts through the Surface, and each user's
-memory is kept separate by identifier.
+Memory holds only the facts extracted from conversations and the facts a user explicitly asks Bark to remember. Raw chat turns are never stored. A user can view and delete their facts through the Surface, and each user's memory is kept separate by identifier.
 
 ## Project structure
 
@@ -128,24 +94,16 @@ cmugpt-agent/
 
 ## Requirements
 
-You will need the following, or Nix in their place (see
-Installation with Nix):
+You will need the following, or Nix in their place (see Installation with Nix):
 
 - [Git](https://git-scm.com/downloads).
-- [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs
-  Python 3.12 if no suitable interpreter is present.
-- PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector)
-  extension.
-- An [OpenRouter API key](https://openrouter.ai/settings/keys) and an
-  [OpenAI API key](https://platform.openai.com/api-keys).
+- [uv](https://docs.astral.sh/uv/getting-started/installation/). It installs Python 3.12 if no suitable interpreter is present.
+- PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension.
+- An [OpenRouter API key](https://openrouter.ai/settings/keys) and an [OpenAI API key](https://platform.openai.com/api-keys).
 
 ## Installation
 
-The steps below set up local development with the full feature set:
-persistent memory, semantic memory search, and moderation. This
-configuration is recommended, since the service then behaves as it does in
-production. The service also starts without `OPENAI_API_KEY` or
-`DATABASE_URL`, with the reduced behavior described under Configuration.
+The steps below set up local development with the full feature set: persistent memory, semantic memory search, and moderation. This configuration is recommended, since the service then behaves as it does in production. The service also starts without `OPENAI_API_KEY` or `DATABASE_URL`, with the reduced behavior described under Configuration.
 
 1. Clone the repository and install its dependencies.
 
@@ -155,14 +113,7 @@ production. The service also starts without `OPENAI_API_KEY` or
    uv sync
    ```
 
-1. Create the memory database. Install
-   [PostgreSQL](https://www.postgresql.org/download/) and the
-   [pgvector extension](https://github.com/pgvector/pgvector#installation),
-   then create an empty database named `cmugpt_agent`. The service creates
-   the pgvector extension, its schema, and its tables on first start. If you
-   prefer not to install PostgreSQL by hand, the dev shell defined in
-   `flake.nix` provides a database with pgvector already set up (see
-   Installation with Nix).
+1. Create the memory database. Install [PostgreSQL](https://www.postgresql.org/download/) and the [pgvector extension](https://github.com/pgvector/pgvector#installation), then create an empty database named `cmugpt_agent`. The service creates the pgvector extension, its schema, and its tables on first start. If you prefer not to install PostgreSQL by hand, the dev shell defined in `flake.nix` provides a database with pgvector already set up (see Installation with Nix).
 
 1. Create the environment file and add the API keys.
 
@@ -177,24 +128,13 @@ production. The service also starts without `OPENAI_API_KEY` or
    OPENAI_API_KEY=<your OpenAI key>
    ```
 
-   `MCP_SERVER_URL` and `DATABASE_URL` are prefilled. They point at the
-   production MCP server and at the `cmugpt_agent` database on the local
-   default socket.
+   `MCP_SERVER_URL` and `DATABASE_URL` are prefilled. They point at the production MCP server and at the `cmugpt_agent` database on the local default socket.
 
 ## Installation with Nix
 
-Members of the `slai` team can use the Nix dev shell in place of the
-Installation steps. It provides Python, uv, and PostgreSQL with pgvector, and
-it loads the team's shared development keys from OpenBao, so no personal API
-keys or `.env` are needed.
+Members of the `slai` team can use the Nix dev shell in place of the Installation steps. It provides Python, uv, and PostgreSQL with pgvector, and it loads the team's shared development keys from OpenBao, so no personal API keys or `.env` are needed.
 
-[Join `slai` through governance](https://git.cmu.dev/ScottyLabs/governance#joining-a-team),
-since team membership grants access to the secrets. Then install Lix and log in
-to OpenBao by following kennel's
-[local development](https://docs.kennel.scottylabs.org/guides/local-development/#installing-nix)
-and [secrets](https://docs.kennel.scottylabs.org/guides/secrets/#local-development)
-guides, clone the repository, enter the dev shell, and start PostgreSQL and the
-service together:
+[Join `slai` through governance](https://git.cmu.dev/ScottyLabs/governance#joining-a-team), since team membership grants access to the secrets. Then install Lix and log in to OpenBao by following kennel's [local development](https://docs.kennel.scottylabs.org/guides/local-development/#installing-nix) and [secrets](https://docs.kennel.scottylabs.org/guides/secrets/#local-development) guides, clone the repository, enter the dev shell, and start PostgreSQL and the service together:
 
 ```sh
 git clone ssh://forgejo@git.cmu.dev/ScottyLabs/cmugpt-agent.git
@@ -203,16 +143,14 @@ nix develop
 pitchfork start --local
 ```
 
-If secrets fail to load after logging in, confirm that your Andrew ID is listed
-in `data/teams/slai.yaml` in governance.
+If secrets fail to load after logging in, confirm that your Andrew ID is listed in `data/teams/slai.yaml` in governance.
 
 ## Configuration
 
-All configuration is read from environment variables by `settings.py`, and
-`.env.example` documents each variable with its default.
+All configuration is read from environment variables by `settings.py`, and `.env.example` documents each variable with its default.
 
 | Variable | Purpose |
-| --- | --- |
+| -- | -- |
 | `OPENROUTER_API_KEY` | Chat, memory extraction, and chat titles |
 | `OPENAI_API_KEY` | Embeddings for memory search and the moderation endpoint. Unset, recall orders facts by recency and moderation is skipped |
 | `DATABASE_URL` | PostgreSQL connection string. Unset, memory lives in an in-memory store that is cleared on restart |
@@ -225,8 +163,7 @@ All configuration is read from environment variables by `settings.py`, and
 | `MEMORY_EXTRACTION_MODEL` | Model for background fact extraction. Default `qwen/qwen3.7-flash` |
 | `TOKEN_USAGE_DB` | SQLite file for the daily token budget. Default `/tmp/cmugpt_token_usage.sqlite3` |
 
-Production does not read `.env`, and `AGENT_SHARED_SECRET` is set there so that
-only the Surface can call the service. See Deployment.
+Production does not read `.env`, and `AGENT_SHARED_SECRET` is set there so that only the Surface can call the service. See Deployment.
 
 ## Running the service
 
@@ -236,8 +173,7 @@ Start the service with:
 uv run cmugpt-agent
 ```
 
-It listens on port 5055. To confirm that it is healthy, request the health
-route:
+It listens on port 5055. To confirm that it is healthy, request the health route:
 
 ```sh
 curl -s localhost:5055/api/health
@@ -247,18 +183,14 @@ curl -s localhost:5055/api/health
 {"status":"ok","memory":{"backend":"postgres","initialized":true,"semantic_search":true,"embedding_model":"text-embedding-3-large","ready":true}}
 ```
 
-`backend` reports `in-memory` when `DATABASE_URL` is unset, and
-`semantic_search` is `false` when `OPENAI_API_KEY` is unset. When the memory
-store cannot be queried, the endpoint returns HTTP 503 with
-`"status": "degraded"`.
+`backend` reports `in-memory` when `DATABASE_URL` is unset, and `semantic_search` is `false` when `OPENAI_API_KEY` is unset. When the memory store cannot be queried, the endpoint returns HTTP 503 with `"status": "degraded"`.
 
 ## API
 
-When `AGENT_SHARED_SECRET` is set, every route except `/api/health` requires
-the header `Authorization: Bearer <secret>`.
+When `AGENT_SHARED_SECRET` is set, every route except `/api/health` requires the header `Authorization: Bearer <secret>`.
 
 | Route | Description |
-| --- | --- |
+| -- | -- |
 | `POST /agent/respond` | Returns the complete answer as a JSON object |
 | `POST /agent/respond/stream` | Returns the answer as Server-Sent Events |
 | `POST /agent/title` | Generates a short title from a chat's first message |
@@ -278,21 +210,16 @@ curl -s localhost:5055/agent/respond \
 Request fields for `/agent/respond` and `/agent/respond/stream`:
 
 | Field | Description |
-| --- | --- |
+| -- | -- |
 | `query` | The user's message. Required. At most 8,000 characters |
 | `user_id` | Identifier for memory and the token budget. The Surface sends a hash of the authenticated user |
 | `message_history` | Prior turns as `{"role", "content"}` objects. The last 40 are used |
 | `model` | OpenRouter model identifier. Default `openai/gpt-5.6-luna` |
 | `disabled_tools` | Tool groups the user has switched off: `maps`, `courses`, `eats`, `guide` |
 
-The streaming endpoint emits several event types. `status` events are sent
-while tools run, and `delta` events carry text as it is generated. A `map`
-event is sent when a campus map accompanies the answer, and a `memory` event
-when a fact is saved or removed. A final `done` event contains the complete
-response object, and an `error` event terminates a failed turn.
+The streaming endpoint emits several event types. `status` events are sent while tools run, and `delta` events carry text as it is generated. A `map` event is sent when a campus map accompanies the answer, and a `memory` event when a fact is saved or removed. A final `done` event contains the complete response object, and an `error` event terminates a failed turn.
 
-Each user is limited to one million tokens per day. Requests beyond that
-limit receive HTTP 429.
+Each user is limited to one million tokens per day. Requests beyond that limit receive HTTP 429.
 
 ## Testing
 
@@ -301,16 +228,9 @@ DATABASE_URL="" uv run pytest    # offline unit tests, as run by CI
 uv run pytest evals              # live evaluations
 ```
 
-The unit tests in `tests/unit/` run with the model replaced by a stub and an
-in-memory store. They are deterministic and fail only when the code is
-incorrect.
+The unit tests in `tests/unit/` run with the model replaced by a stub and an in-memory store. They are deterministic and fail only when the code is incorrect.
 
-The evaluations in `evals/` send real questions to the configured model and
-MCP server and check the behavior of the answers: tool usage, refusal of
-prompt injection, and absence of fabricated details. They require
-`OPENROUTER_API_KEY` and `MCP_SERVER_URL` and incur API costs. When either key
-is absent they are skipped, and they are not part of the default `pytest`
-run.
+The evaluations in `evals/` send real questions to the configured model and MCP server and check the behavior of the answers: tool usage, refusal of prompt injection, and absence of fabricated details. They require `OPENROUTER_API_KEY` and `MCP_SERVER_URL` and incur API costs. When either key is absent they are skipped, and they are not part of the default `pytest` run.
 
 ## Development
 
@@ -324,19 +244,14 @@ uv run ty check       # type check
 
 ## Deployment
 
-Production runs on [Kennel](https://docs.kennel.scottylabs.org/guides/deploying/),
-which deploys the `agent` package defined in `flake.nix` with the secrets from
-the `prod` profile of `secretspec.toml`. That profile sets
-`AGENT_ENV=production`, so the service refuses to start without `DATABASE_URL`
-and an `AGENT_SHARED_SECRET` of at least 32 characters.
+Production runs on [Kennel](https://docs.kennel.scottylabs.org/guides/deploying/), which deploys the `agent` package defined in `flake.nix` with the secrets from the `prod` profile of `secretspec.toml`. That profile sets `AGENT_ENV=production`, so the service refuses to start without `DATABASE_URL` and an `AGENT_SHARED_SECRET` of at least 32 characters.
 
 - <https://api.cmugpt-agent.scottylabs.org> (custom domain)
 - <https://cmugpt-agent-agent-main.scottylabs.net> (default Kennel URL)
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, the code style,
-the commit conventions, and the pull request process.
+[CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, the code style, the commit conventions, and the pull request process.
 
 ## Related repositories
 

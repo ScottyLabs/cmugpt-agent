@@ -17,11 +17,7 @@ from urllib.parse import urlparse
 from .schema import ActionType, AgentResponse, Thought
 from .settings import get_settings
 
-# Strings the prompt explicitly instructs the model to echo. The leak
-# detector must exempt them, since otherwise a legitimate crisis response or
-# refusal would itself be classified as a leak and discarded. prompts.py
-# interpolates these same constants, so the allowlist cannot drift from the
-# prompt.
+# Strings the prompt explicitly instructs the model to echo. The leak detector must exempt them, since otherwise a legitimate crisis response or refusal would itself be classified as a leak and discarded. prompts.py interpolates these same constants, so the allowlist cannot drift from the prompt.
 IDENTITY_PHRASE = "Bark, an assistant for CMU campus information"
 CRISIS_RESOURCES_LINE = (
     "CMU CaPS (412-268-2922), the 988 Suicide & Crisis Lifeline, or CMU "
@@ -73,8 +69,7 @@ NEGATIVE_TOOL_CLAIM_PATTERNS = [
     ),
 ]
 
-# Phrases that suggest the assistant declined or redirected. They only
-# calibrate confidence and never decide whether to refuse.
+# Phrases that suggest the assistant declined or redirected. They only calibrate confidence and never decide whether to refuse.
 REFUSAL_MARKERS = (
     "can't help",
     "cannot help",
@@ -150,27 +145,20 @@ def apply_tool_transparency_guard(
 
 _REDACTION = "[redacted]"
 
-# Environment variables whose live values must never reach the user. The
-# model does not observe most of them, but tool errors and misconfigured
-# servers can propagate them into output.
+# Environment variables whose live values must never reach the user. The model does not observe most of them, but tool errors and misconfigured servers can propagate them into output.
 
-# The scrubber skips secret values that overlap these public URLs, since
-# redacting them would corrupt every legitimate map link.
+# The scrubber skips secret values that overlap these public URLs, since redacting them would corrupt every legitimate map link.
 _PUBLIC_URL_PREFIXES = ("https://maps.scottylabs.org",)
 
-# It also skips unset or very short values, since substituting those
-# would corrupt ordinary text.
+# It also skips unset or very short values, since substituting those would corrupt ordinary text.
 _MIN_SECRET_CHARS = 8
 
 _OPENROUTER_KEY_RE = re.compile(r"sk-or(?:-v1)?-[A-Za-z0-9]{20,}")
 
-# Only high-entropy bearer tokens are redacted, so a code-help answer can
-# still show a placeholder token.
+# Only high-entropy bearer tokens are redacted, so a code-help answer can still show a placeholder token.
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{30,})")
 
-# A leak is any 80-character window of the normalized answer that appears
-# verbatim in the prompt. The stride cuts the number of scans and raises
-# the effective detection threshold slightly.
+# A leak is any 80-character window of the normalized answer that appears verbatim in the prompt. The stride cuts the number of scans and raises the effective detection threshold slightly.
 _LEAK_WINDOW = 80
 _LEAK_SCAN_STEP = 8
 
@@ -249,11 +237,7 @@ def _redact_secrets(text: str) -> str:
     return _BEARER_TOKEN_RE.sub(_redact_bearer_match, cleaned)
 
 
-# Reasoning models (MiniMax, DeepSeek, GLM) may delimit their chain of thought with
-# a tag such as `<think>` or `<mm:think>`. OpenRouter routes that content to a
-# separate field, but the closing delimiter intermittently bleeds into the
-# answer channel. Any such tag is stripped from outgoing text so it never
-# reaches the user. The optional `<provider>:` prefix covers vendor variants.
+# Reasoning models (MiniMax, DeepSeek, GLM) may delimit their chain of thought with a tag such as `<think>` or `<mm:think>`. OpenRouter routes that content to a separate field, but the closing delimiter intermittently bleeds into the answer channel. Any such tag is stripped from outgoing text so it never reaches the user. The optional `<provider>:` prefix covers vendor variants.
 _REASONING_TAG_RE = re.compile(
     r"</?(?:[a-z]{1,12}:)?think(?:ing)?\s*>",
     re.IGNORECASE,
@@ -295,9 +279,7 @@ class StreamScrubber:
         self._corpus = _build_leak_corpus(system_prompt) if system_prompt else ""
         self._secrets = _secret_values()
         self._text = ""
-        # Count of cleaned (tag-stripped) characters already emitted. Tracking
-        # in cleaned space lets a reasoning tag split across chunks still be
-        # removed, since the whole safe region is re-stripped each push.
+        # Count of cleaned (tag-stripped) characters already emitted. Tracking in cleaned space lets a reasoning tag split across chunks still be removed, since the whole safe region is re-stripped each push.
         self._emitted_clean = 0
         self.tripped = False
 
@@ -309,8 +291,7 @@ class StreamScrubber:
         return _matches_leak_corpus(self._text, self._corpus)
 
     def _emit_up_to(self, safe_raw: str) -> str:
-        # HOLDBACK_CHARS greatly exceeds any tag length, so safe_raw never ends
-        # mid-tag and its cleaned form only grows as a stable prefix.
+        # HOLDBACK_CHARS greatly exceeds any tag length, so safe_raw never ends mid-tag and its cleaned form only grows as a stable prefix.
         clean = _strip_reasoning_tags(safe_raw)
         out = clean[self._emitted_clean :]
         self._emitted_clean = len(clean)
@@ -337,10 +318,7 @@ class StreamScrubber:
         return self._emit_up_to(self._text)
 
 
-# High-precision signatures only. A false positive refuses a legitimate user
-# with no opportunity for model recourse, so ambiguous phrasing is left to
-# the prompt rules. The lookahead exempts shell-help questions about
-# terminal prompts.
+# High-precision signatures only. A false positive refuses a legitimate user with no opportunity for model recourse, so ambiguous phrasing is left to the prompt rules. The lookahead exempts shell-help questions about terminal prompts.
 INJECTION_FAST_PATH_RE = re.compile(
     r"(?i)("
     r"ignore\s+all\s+(?:previous|prior|above)\s+instructions"
@@ -403,8 +381,7 @@ def compute_thought(
             confidence=0.3,
         )
 
-    # A failed call still produces a non-empty failure string, so the `ok`
-    # flag is what distinguishes returned data from an error.
+    # A failed call still produces a non-empty failure string, so the `ok` flag is what distinguishes returned data from an error.
     tools_returned_data = any(
         inv.get("ok", True)
         and isinstance(inv.get("result"), str)
