@@ -20,14 +20,12 @@ from ..settings import get_settings
 from .facts import add_fact
 from .store import FACTS, item_text, search
 
-# Budget for the background learn() pass. Each run costs one extraction
-# model call.
+# Budget for the background learn() pass. Each run costs one extraction model call.
 LEARN_MIN_INTERVAL_SECONDS = 2.0
 LEARN_MAX_PER_HOUR = 60
 
 
-# The extraction model reads the exchange and returns an empty list when
-# nothing durable was said.
+# The extraction model reads the exchange and returns an empty list when nothing durable was said.
 
 _EXTRACTION_SYSTEM = (
     "You maintain a long-term memory of durable facts about a user across "

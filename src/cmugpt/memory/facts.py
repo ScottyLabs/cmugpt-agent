@@ -22,19 +22,15 @@ _RECALL_FACTS = 8
 
 # A fact is a near-duplicate of an existing one at/above this cosine score.
 _DEDUP_SCORE = 0.92
-# Below this score a "forget" request is a no-op, so asking to forget an
-# unstored fact cannot delete its nearest stored neighbor.
+# Below this score a "forget" request is a no-op, so asking to forget an unstored fact cannot delete its nearest stored neighbor.
 _FORGET_FLOOR = 0.30
 
-# Per-user growth cap. Recall injects only the top matches, so a large
-# store costs storage rather than tokens. The cap exists to stop scripted,
+# Per-user growth cap. Recall injects only the top matches, so a large store costs storage rather than tokens. The cap exists to stop scripted,
 # unbounded growth. Beyond it, writes evict in _eviction_order:
 # auto-extracted facts first, oldest first.
 MAX_FACTS: int = 1000
 
-# A cap check scans the whole namespace, so it runs on the first write per
-# namespace in each process and then every Nth write. Briefly exceeding the
-# cap between checks is harmless.
+# A cap check scans the whole namespace, so it runs on the first write per namespace in each process and then every Nth write. Briefly exceeding the cap between checks is harmless.
 CAP_CHECK_EVERY: int = 20
 
 
@@ -134,8 +130,7 @@ async def recall(
 
 FactWriteStatus = Literal["saved", "duplicate", "updated", "skipped"]
 
-# Angle-bracket runs are stripped on write so a stored fact can never close
-# recall()'s <<<USER_MEMORY>>> sentinel block early.
+# Angle-bracket runs are stripped on write so a stored fact can never close recall()'s <<<USER_MEMORY>>> sentinel block early.
 _SENTINEL_RE = re.compile(r"<{3,}|>{3,}")
 
 
@@ -190,15 +185,12 @@ async def add_fact(
     return key, "saved"
 
 
-# Two candidates whose scores differ by less than this are considered
-# equally plausible referents, so nothing is deleted and the caller is told
-# to ask the user which fact they mean.
+# Two candidates whose scores differ by less than this are considered equally plausible referents, so nothing is deleted and the caller is told to ask the user which fact they mean.
 _FORGET_AMBIGUITY_GAP = 0.10
 
 
 def _ambiguity_message(candidates: list[SearchItem]) -> str:
-    # The "No matching memory" prefix marks this as a non-deletion for the
-    # event layer, which suppresses the removed-memory chip.
+    # The "No matching memory" prefix marks this as a non-deletion for the event layer, which suppresses the removed-memory chip.
     listing = "; ".join(f"'{item_text(item)}'" for item in candidates[:3])
     return (
         "No matching memory was forgotten: several remembered facts could "

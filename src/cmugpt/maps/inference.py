@@ -22,32 +22,25 @@ from .buildings import (
 
 CMU_MAPS_BASE_URL = "https://maps.scottylabs.org"
 
-# Local presentation tool the model calls to attach a map. The maps_ prefix
-# puts it under the existing CMUMaps group toggle.
+# Local presentation tool the model calls to attach a map. The maps_ prefix puts it under the existing CMUMaps group toggle.
 SHOW_MAP_TOOL_NAME = "maps_show_map"
 
 CMU_MAPS_QUERY_RE = re.compile(
     r"\b("
-    # The "wheres" alternative covers the apostrophe-free typo, which a bare
-    # word-boundary match on "where" cannot reach.
+    # The "wheres" alternative covers the apostrophe-free typo, which a bare word-boundary match on "where" cannot reach.
     r"where'?s?|located|location|directions?|route|path|map|walk|walking|"
     r"get\s+to|go\s+to|take\s+me|show\s+me|navigate|how\s+far|from|between"
     r")\b",
     re.IGNORECASE,
 )
 
-# KNOWN_CMU_LOCATIONS maps aliases to codes and names, LOCATION_ID_TO_LABEL
-# maps codes to names. Both derive from buildings.json in maps/buildings.py.
+# KNOWN_CMU_LOCATIONS maps aliases to codes and names, LOCATION_ID_TO_LABEL maps codes to names. Both derive from buildings.json in maps/buildings.py.
 LOCATION_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,4}\b")
 PAREN_LOCATION_RE = re.compile(
     r"(?P<label>[A-Z][A-Za-z0-9 '&.-]{1,80})\s*\((?P<id>[A-Z0-9]{2,5})\)"
 )
 
-# The routing tool can fail while a valid map is still attached, so the model
-# truthfully reports the error even though the user can see the route. These
-# claims must be stripped, which means matching how a model describes a dead
-# tool ("not able to get", "didn't return a usable route") as well as a
-# failed lookup.
+# The routing tool can fail while a valid map is still attached, so the model truthfully reports the error even though the user can see the route. These claims must be stripped, which means matching how a model describes a dead tool ("not able to get", "didn't return a usable route") as well as a failed lookup.
 _MAP_FAILURE_VERBS = (
     r"wasn['\u2019]?t\s+able|was\s+not\s+able|not\s+able|"
     r"couldn['\u2019]?t|could\s+not|cannot|can['\u2019]?t|"
@@ -64,10 +57,7 @@ _MAP_FAILURE_OBJECTS = (
     r"data|directions?|route|routing|path|building|tool"
 )
 
-# The routing subsystem named as the grammatical subject, as in "the route
-# tool is not working". Matching this explicitly allows the reversed
-# subject-then-verb order without admitting ordinary prose such as
-# "head toward the building, you can't miss it".
+# The routing subsystem named as the grammatical subject, as in "the route tool is not working". Matching this explicitly allows the reversed subject-then-verb order without admitting ordinary prose such as "head toward the building, you can't miss it".
 _MAP_FAILURE_SUBJECT = (
     r"(?:rout(?:e|ing)|path|direction)\w*\s+"
     r"(?:tool|lookup|api|service|request|call|data)"
@@ -120,9 +110,7 @@ def _location_from_text(text: str | None) -> tuple[str, str | None] | None:
         if re.search(rf"\b{re.escape(alias)}\b", lowered):
             return loc_id, label
 
-    # Bare uppercase tokens count as building IDs only when the catalog
-    # contains them, since otherwise arbitrary capitalized words in free text
-    # would hijack the answer with a spurious map.
+    # Bare uppercase tokens count as building IDs only when the catalog contains them, since otherwise arbitrary capitalized words in free text would hijack the answer with a spurious map.
     explicit_id = LOCATION_ID_RE.search(cleaned)
     if explicit_id:
         loc = _location_from_id(explicit_id.group(0))
@@ -163,8 +151,7 @@ def _direction_locations_from_query(
             re.IGNORECASE,
         ),
         # Covers origins stated as the speaker's position, as in "I'm at
-        # Gates, how do I get to Baker". The source capture stops at
-        # punctuation so it does not swallow the question.
+        # Gates, how do I get to Baker". The source capture stops at punctuation so it does not swallow the question.
         re.compile(
             r"\b(?:i'?m|i\s+am|we'?re|we\s+are)\s+(?:at|in|near|by)\s+"
             r"(?P<src>[^,.;?!]+?)[,.;]?\s.*?"
@@ -184,8 +171,7 @@ def _direction_locations_from_query(
     return None
 
 
-# Trailing room number, as in "Wean 5310". Indoor data requires
-# authentication, so the room only selects which building to show.
+# Trailing room number, as in "Wean 5310". Indoor data requires authentication, so the room only selects which building to show.
 _ROOM_SUFFIX_RE = re.compile(r"\s+[A-Za-z]?\d{2,4}[A-Za-z]?$")
 _FILLER_RE = re.compile(
     r"^(?:please|hey|hi|ok(?:ay)?)[\s,]+|[\s,]+(?:please|thanks|thank\s+you)$",
@@ -331,17 +317,13 @@ def _infer_cmu_maps(
     model_decides: bool = False,
 ) -> CmuMaps:
     # The model's explicit decision takes precedence over everything below,
-    # including the intent gate, since it judges phrasing and history that no
-    # pattern can. The latest call wins, as the model may correct itself.
+    # including the intent gate, since it judges phrasing and history that no pattern can. The latest call wins, as the model may correct itself.
     for call in reversed(tool_invocations):
         decided = _maps_from_show_map(call)
         if decided:
             return decided
 
-    # When the show-map tool was bound this turn, not calling it is itself the
-    # model's decision, so the pattern fallbacks below must not outvote it
-    # (they would map a bare "hi" to the HI building). They remain only for
-    # turns where the model never had the tool.
+    # When the show-map tool was bound this turn, not calling it is itself the model's decision, so the pattern fallbacks below must not outvote it (they would map a bare "hi" to the HI building). They remain only for turns where the model never had the tool.
     if model_decides:
         return CmuMaps()
 
@@ -419,12 +401,10 @@ def _cmu_maps_success_text(cmu_maps: CmuMaps) -> str:
     return f"Here's **{target}** on CMU Maps."
 
 
-# Sentence boundary for scrubbing. Splitting by line first keeps markdown
-# headings and list items isolated.
+# Sentence boundary for scrubbing. Splitting by line first keeps markdown headings and list items isolated.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-# A leading list marker or heading belongs to the line as a whole, so it is
-# preserved even when the sentence carrying it is removed.
+# A leading list marker or heading belongs to the line as a whole, so it is preserved even when the sentence carrying it is removed.
 _LINE_PREFIX_RE = re.compile(r"^\s*(?:[-*+]\s+|#{1,6}\s+|\d+[.)]\s+)?")
 
 
@@ -446,8 +426,7 @@ def _scrub_line(line: str) -> str:
     stripped = line.strip()
     if not stripped:
         return line
-    # The marker is removed before splitting, since "1. " would otherwise
-    # parse as its own sentence and be reattached twice.
+    # The marker is removed before splitting, since "1. " would otherwise parse as its own sentence and be reattached twice.
     prefix_match = _LINE_PREFIX_RE.match(stripped)
     prefix = prefix_match.group(0) if prefix_match else ""
     sentences = _SENTENCE_SPLIT_RE.split(stripped[len(prefix) :])
@@ -467,8 +446,7 @@ def _strip_false_map_failure(text: str) -> str:
     kept: list[str] = []
     for line in text.splitlines():
         scrubbed = _scrub_line(line)
-        # A line whose every sentence offended scrubs to empty and is
-        # dropped. Originally blank lines are retained so paragraphs survive.
+        # A line whose every sentence offended scrubs to empty and is dropped. Originally blank lines are retained so paragraphs survive.
         if scrubbed.strip() or not line.strip():
             kept.append(scrubbed)
     cleaned = "\n".join(kept)
@@ -510,10 +488,7 @@ def _apply_cmu_maps_guard(
     inferred = _infer_cmu_maps(messages, tool_invocations, model_decides=model_decides)
     if inferred.url:
         parsed.cmu_maps = inferred
-        # The validated map wins over the text. If the text still claims the
-        # lookup failed, repair it so the user never sees the contradiction. Raw
-        # tool errors never reach the model, but a model that names a place absent
-        # from the catalog can still invent a failure claim, so this backstop stays.
+        # The validated map wins over the text. If the text still claims the lookup failed, repair it so the user never sees the contradiction. Raw tool errors never reach the model, but a model that names a place absent from the catalog can still invent a failure claim, so this backstop stays.
         if MAP_FAILURE_CLAIM_RE.search(parsed.response_text or ""):
             parsed.response_text = _repair_false_map_failure(
                 parsed.response_text or "", inferred

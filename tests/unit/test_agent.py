@@ -74,8 +74,7 @@ async def fake_run_agent(
 
 @pytest.fixture(autouse=True)
 def _no_shared_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Keep the suite independent of a developer's local .env. The dedicated
-    # shared-secret tests below set and verify authentication explicitly.
+    # Keep the suite independent of a developer's local .env. The dedicated shared-secret tests below set and verify authentication explicitly.
     monkeypatch.delenv("AGENT_SHARED_SECRET", raising=False)
     monkeypatch.delenv("AGENT_ENV", raising=False)
     monkeypatch.setenv("AGENT_ALLOW_UNAUTHENTICATED", "1")
@@ -163,8 +162,7 @@ def test_agent_respond_enforces_input_caps(client: TestClient) -> None:
 
 
 def test_memory_endpoints_reject_wildcard_user_id(client: TestClient) -> None:
-    # A LIKE-wildcard user_id must be rejected at the boundary, not reach the
-    # store (where it would match every user's namespace).
+    # A LIKE-wildcard user_id must be rejected at the boundary, not reach the store (where it would match every user's namespace).
     body_wildcard = client.post(
         "/agent/respond",
         json={"query": "Hi", "user_id": "%"},
@@ -219,8 +217,7 @@ def test_missing_shared_secret_fails_closed(client: TestClient) -> None:
     )
     assert_equal(health.status_code, HTTPStatus.OK, "health stays public")
 
-    # The development opt-in never applies in production, even if the
-    # startup check were bypassed.
+    # The development opt-in never applies in production, even if the startup check were bypassed.
     with temporary_env("AGENT_ENV", "production"):
         blocked = client.post("/agent/respond", json={"query": "Hi"})
     assert_equal(

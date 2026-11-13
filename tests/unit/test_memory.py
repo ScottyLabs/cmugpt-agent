@@ -152,8 +152,7 @@ async def test_forget_tool_scales_from_one_to_everything() -> None:
     await memory.add_fact(store, "u1", "Prefers window seats")
     await memory.add_fact(store, "u1", "Majors in ECE")
 
-    # Several facts in one call without confirmation: nothing is removed and
-    # the would-be deletions are reported for the user to confirm.
+    # Several facts in one call without confirmation: nothing is removed and the would-be deletions are reported for the user to confirm.
     preview = await forget_tool.ainvoke(
         {"facts": ["allergic to peanuts", "prefers window seats"]}
     )
@@ -166,8 +165,7 @@ async def test_forget_tool_scales_from_one_to_everything() -> None:
         len(await memory.list_facts(store, "u1")), 3, "unconfirmed call deletes nothing"
     )
 
-    # The same call with confirmed=true removes the named facts, reporting an
-    # entry that matches nothing.
+    # The same call with confirmed=true removes the named facts, reporting an entry that matches nothing.
     multi = await forget_tool.ainvoke(
         {
             "facts": ["allergic to peanuts", "prefers window seats", "owns a boat"],
@@ -205,8 +203,7 @@ async def test_forget_asks_when_ambiguous() -> None:
     await memory.add_fact(store, "u1", "Allergic to peanuts")
     await memory.add_fact(store, "u1", "Allergic to shellfish")
 
-    # A query matching both facts equally must delete nothing and surface
-    # the candidates so the model can ask the user to choose.
+    # A query matching both facts equally must delete nothing and surface the candidates so the model can ask the user to choose.
     reply = await forget_tool.ainvoke({"facts": ["allergic"]})
     assert_true(
         "several remembered facts could match" in reply,
@@ -253,8 +250,7 @@ async def test_user_id_wildcard_cannot_cross_read() -> None:
     await memory.add_fact(store, "alice", "Alice is allergic to shellfish")
     await memory.add_fact(store, "bob", "Bob lives in Morewood")
 
-    # '%' / '_' are SQL LIKE wildcards. The allowlist must reject them so they
-    # never reach the store's (unescaped) LIKE prefix match.
+    # '%' / '_' are SQL LIKE wildcards. The allowlist must reject them so they never reach the store's (unescaped) LIKE prefix match.
     assert_true(not memory.is_valid_user_id("%"), "'%' rejected")
     assert_true(not memory.is_valid_user_id("_"), "'_' rejected")
     assert_true(not memory.is_valid_user_id("a.b"), "namespace separator rejected")
@@ -353,9 +349,7 @@ async def test_learn_never_persists_raw_turns() -> None:
     store = InMemoryStore()
     user = "no-raw-chat-user"
     memory.extraction._learn_history.pop(user, None)
-    # The real extractor is a live LLM call, which this offline suite must
-    # never make (CI has no model credentials). The stub returns a canned
-    # extraction so the rest of learn's write path runs for real.
+    # The real extractor is a live LLM call, which this offline suite must never make (CI has no model credentials). The stub returns a canned extraction so the rest of learn's write path runs for real.
     real_extractor = memory.extraction._extractor_model
     memory.extraction._extractor_model = cast(Any, _FakeExtractorModel)
     try:

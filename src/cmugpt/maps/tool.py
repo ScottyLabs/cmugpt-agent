@@ -17,9 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .buildings import LOCATION_ID_TO_LABEL
 from .inference import SHOW_MAP_TOOL_NAME
 
-# Codes like 2SC are not valid Python identifiers, so member names carry a
-# prefix. Only the bare code values appear in the JSON schema and in the args
-# the model sends.
+# Codes like 2SC are not valid Python identifiers, so member names carry a prefix. Only the bare code values appear in the JSON schema and in the args the model sends.
 BuildingCode = StrEnum(
     "BuildingCode",
     {f"B_{code}": code for code in sorted(LOCATION_ID_TO_LABEL)},
@@ -50,8 +48,7 @@ def _label(code: str) -> str:
 
 
 def _show_map(destination: str, origin: str | None = None) -> str:
-    # StrEnum members are str, so str annotations stay truthful for the
-    # validated values langchain passes in.
+    # StrEnum members are str, so str annotations stay truthful for the validated values langchain passes in.
     dest = str(destination)
     src = str(origin) if origin is not None else None
     if src and src != dest:

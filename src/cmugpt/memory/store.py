@@ -22,15 +22,10 @@ from ..settings import get_settings
 logger = logging.getLogger(__name__)
 
 FACTS = "facts"
-# Raw chat turns from older builds. Nothing writes here anymore. The name is
-# kept so cleanup can still delete what those builds stored.
+# Raw chat turns from older builds. Nothing writes here anymore. The name is kept so cleanup can still delete what those builds stored.
 EPISODES = "episodes"
 
-# The user_id is the key that separates one user's stored memory from
-# another's. LangGraph matches that key as a SQL LIKE pattern without
-# escaping, so the allowlist excludes the wildcards ("%", "_") and the
-# separator ".". A hostile user_id therefore cannot match another user's
-# namespace. Every entry point checks it.
+# The user_id is the key that separates one user's stored memory from another's. LangGraph matches that key as a SQL LIKE pattern without escaping, so the allowlist excludes the wildcards ("%", "_") and the separator ".". A hostile user_id therefore cannot match another user's namespace. Every entry point checks it.
 _USER_ID_RE = re.compile(r"^[A-Za-z0-9@:+=~-]{1,128}$")
 
 
@@ -39,8 +34,7 @@ def is_valid_user_id(user_id: str | None) -> bool:
     return bool(user_id) and bool(_USER_ID_RE.match(user_id))
 
 
-# Postgres connection pool size. Without a pool, langgraph shares one
-# connection and every memory operation waits its turn on it.
+# Postgres connection pool size. Without a pool, langgraph shares one connection and every memory operation waits its turn on it.
 _PG_POOL_MIN = 1
 _PG_POOL_MAX = 10
 _PG_SETUP_LOCK_ID = 4848217165257290356
@@ -72,8 +66,7 @@ def _index_config() -> IndexConfig | None:
             "dims": _EMBED_DIMS,
             "embed": embeddings,
             "fields": ["text"],
-            # pgvector's HNSW index supports at most 2,000 dimensions for
-            # vector and 4,000 for halfvec. The large OpenAI model emits 3,072.
+            # pgvector's HNSW index supports at most 2,000 dimensions for vector and 4,000 for halfvec. The large OpenAI model emits 3,072.
             "ann_index_config": {
                 "kind": "hnsw",
                 "vector_type": _PG_VECTOR_TYPE,
@@ -112,8 +105,7 @@ async def setup_store() -> BaseStore:
                 ) from exc
             _pg_cm = AsyncPostgresStore.from_conn_string(
                 _conn_string_with_search_path(db_url),
-                # _index_config's dict carries Postgres-specific keys beyond
-                # the shared IndexConfig type.
+                # _index_config's dict carries Postgres-specific keys beyond the shared IndexConfig type.
                 index=cast(Any, index),
                 pool_config=cast(
                     Any, {"min_size": _PG_POOL_MIN, "max_size": _PG_POOL_MAX}
@@ -226,13 +218,11 @@ async def _setup_postgres_store(store: Any, db_url: str) -> None:
     """Serialize LangGraph's first-run migrations across worker processes."""
     from psycopg import AsyncConnection
 
-    # Dedicated autocommit connection for the advisory lock: borrowing from
-    # the store's own pool during setup can deadlock a small pool.
+    # Dedicated autocommit connection for the advisory lock: borrowing from the store's own pool during setup can deadlock a small pool.
     async with await AsyncConnection.connect(db_url, autocommit=True) as conn:
         try:
             # The schema name is written out here rather than composed from
-            # _PG_SCHEMA, so nothing can be injected into this statement. Keep the
-            # two in sync.
+            # _PG_SCHEMA, so nothing can be injected into this statement. Keep the two in sync.
             await conn.execute("CREATE SCHEMA IF NOT EXISTS agent_memory")
         except Exception as exc:
             raise RuntimeError(
@@ -242,9 +232,7 @@ async def _setup_postgres_store(store: Any, db_url: str) -> None:
                 f"USAGE, CREATE ON SCHEMA {_PG_SCHEMA} TO <role>)."
             ) from exc
         # Poll pg_try_advisory_lock instead of blocking in pg_advisory_lock:
-        # LangGraph runs CREATE INDEX CONCURRENTLY, which waits on every older
-        # open transaction, so a worker parked inside the blocking SELECT
-        # would deadlock the worker holding the lock.
+        # LangGraph runs CREATE INDEX CONCURRENTLY, which waits on every older open transaction, so a worker parked inside the blocking SELECT would deadlock the worker holding the lock.
         while True:
             cursor = await conn.execute(
                 "SELECT pg_try_advisory_lock(%s)", (_PG_SETUP_LOCK_ID,)
@@ -299,9 +287,7 @@ async def search(
     so order-dependent behavior differs between local runs and production.
     """
     if not is_valid_user_id(namespace[0]):
-        # Every caller has already validated the id, but every read passes
-        # through here, so check again and never build a query from an unsafe
-        # key.
+        # Every caller has already validated the id, but every read passes through here, so check again and never build a query from an unsafe key.
         return []
     try:
         if query and has_index(store):

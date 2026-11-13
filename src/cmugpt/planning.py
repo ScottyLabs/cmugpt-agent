@@ -63,9 +63,7 @@ def helper_messages(query: str) -> list[dict[str, Any]]:
     return [{"role": "user", "content": query}]
 
 
-# A follow-up such as "what about Wean?" rarely repeats a data keyword, so
-# the last few user turns are scanned as well. A conversation that needed
-# tools then keeps them.
+# A follow-up such as "what about Wean?" rarely repeats a data keyword, so the last few user turns are scanned as well. A conversation that needed tools then keeps them.
 _HISTORY_GATE_TURNS = 4
 
 
@@ -118,8 +116,7 @@ def needs_memory_recall(query: str, history_texts: list[str] | None = None) -> b
 def _cap_history_text(content: str) -> str:
     if len(content) <= _HISTORY_MAX_MESSAGE_CHARS:
         return content
-    # Retain the head, since answers front-load the substance that
-    # follow-ups reference.
+    # Retain the head, since answers front-load the substance that follow-ups reference.
     return content[:_HISTORY_MAX_MESSAGE_CHARS] + "\n[earlier turn truncated]"
 
 
@@ -188,8 +185,7 @@ async def prepare_tools_and_store(
 
     tools: list[BaseTool] = []
     if wants_data_tools:
-        # Narrowing runs after the disabled-group filter so that a keyword
-        # match can never re-bind a disabled group.
+        # Narrowing runs after the disabled-group filter so that a keyword match can never re-bind a disabled group.
         mcp_tools = filter_tools(await load_mcp_tools(), disabled_tools)
         tools.extend(
             select_tools_for_query(
@@ -197,12 +193,7 @@ async def prepare_tools_and_store(
             )
         )
     if maps_enabled:
-        # Bound outside the data-tools gate on purpose: the map is the model's
-        # decision, so the tool must always be in its hands. Keyword gating here
-        # would decide navigation before the model could. The tool is local, so
-        # it costs no MCP discovery. The price is the catalog section on every
-        # turn. Postprocess still validates every proposal, and query inference
-        # remains only a fallback.
+        # Bound outside the data-tools gate on purpose: the map is the model's decision, so the tool must always be in its hands. Keyword gating here would decide navigation before the model could. The tool is local, so it costs no MCP discovery. The price is the catalog section on every turn. Postprocess still validates every proposal, and query inference remains only a fallback.
         tools.append(build_show_map_tool())
 
     store: BaseStore | None = None

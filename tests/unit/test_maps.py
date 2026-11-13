@@ -65,8 +65,7 @@ LOCATION_CASES = [
     ("Wean 5310", "@WEH"),
 ]
 
-# Queries that must not produce a map: no location intent, off campus
-# targets, or a building named only in passing.
+# Queries that must not produce a map: no location intent, off campus targets, or a building named only in passing.
 ABSTAIN_CASES = [
     "Is La Prima open?",
     "What time does the UC gym close?",
@@ -175,8 +174,7 @@ def test_show_map_last_call_wins() -> None:
 
 
 def test_show_map_outranks_routing_tool_ids() -> None:
-    # Mid reasoning data lookups may involve other buildings. The explicit
-    # presentation call is what the user should see.
+    # Mid reasoning data lookups may involve other buildings. The explicit presentation call is what the user should see.
     calls = [
         {"name": "maps_get_path", "arguments": {"start_id": "TEP", "end_id": "MM"}},
         _show_map_call("GHC", origin="MUD"),
@@ -188,8 +186,7 @@ def test_show_map_tool_schema_matches_catalog() -> None:
     from cmugpt.maps.buildings import LOCATION_ID_TO_LABEL
     from cmugpt.maps.tool import BuildingCode, build_show_map_tool
 
-    # StrEnum members are their own values. str() avoids ty tripping on the
-    # runtime built enum's attributes.
+    # StrEnum members are their own values. str() avoids ty tripping on the runtime built enum's attributes.
     codes = {str(member) for member in BuildingCode}
     if codes != set(LOCATION_ID_TO_LABEL):
         raise AssertionError("BuildingCode enum diverged from the catalog")
@@ -202,8 +199,7 @@ def test_show_map_tool_schema_matches_catalog() -> None:
 
 
 def test_map_intent_matches_inference() -> None:
-    # query_has_map_intent gates answer buffering. It must say yes wherever
-    # inference maps and no wherever inference abstains.
+    # query_has_map_intent gates answer buffering. It must say yes wherever inference maps and no wherever inference abstains.
     for query, _ in DIRECTIONS_CASES + LOCATION_CASES:
         if not query_has_map_intent(query):
             raise AssertionError(f"{query!r}: inference maps, intent says no")

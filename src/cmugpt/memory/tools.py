@@ -18,14 +18,11 @@ from .facts import add_fact, forget, resolve_forget_targets
 from .manage import clear_memory
 from .store import is_valid_user_id
 
-# Names of the model-callable memory tools. Trust is decided by the metadata
-# marker below, never by name.
+# Names of the model-callable memory tools. Trust is decided by the metadata marker below, never by name.
 REMEMBER_TOOL = "remember"
 FORGET_TOOL = "forget"
 
-# BaseTool.metadata marker set by build_memory_tools. The graph trusts only
-# tools carrying it: an MCP server could publish its own "remember" tool, and
-# that one must stay untrusted.
+# BaseTool.metadata marker set by build_memory_tools. The graph trusts only tools carrying it: an MCP server could publish its own "remember" tool, and that one must stay untrusted.
 INTERNAL_MEMORY_METADATA = "cmugpt_internal_memory"
 
 
@@ -121,11 +118,7 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
         queries = [q for q in (facts or []) if isinstance(q, str) and q.strip()]
         if not queries:
             return "No matching memory found to forget."
-        # Removing several facts at once requires the user's explicit
-        # confirmation. The prompt alone cannot enforce this: a model can
-        # read a singular request ("forget my allergy") as a category and
-        # expand it to every matching fact, so the tool refuses instead and
-        # reports what would be removed.
+        # Removing several facts at once requires the user's explicit confirmation. The prompt alone cannot enforce this: a model can read a singular request ("forget my allergy") as a category and expand it to every matching fact, so the tool refuses instead and reports what would be removed.
         if len(queries) > 1 and not confirmed:
             resolved = await resolve_forget_targets(store, user_id, queries)
             if not resolved:
@@ -150,8 +143,7 @@ def build_memory_tools(store: BaseStore, user_id: str) -> list[BaseTool]:
             else:
                 unmatched += 1
         if not forgotten:
-            # Ambiguity outranks a plain no-match: the model must ask the
-            # user which fact they meant rather than report failure.
+            # Ambiguity outranks a plain no-match: the model must ask the user which fact they meant rather than report failure.
             return ambiguous[0] if ambiguous else "No matching memory found to forget."
         summary = "Forgot: " + "; ".join(forgotten)
         if ambiguous:

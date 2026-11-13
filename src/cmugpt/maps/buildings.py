@@ -14,8 +14,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-# buildings.json is package data, so the same path works in an editable
-# checkout and in the installed wheel.
+# buildings.json is package data, so the same path works in an editable checkout and in the installed wheel.
 _BUILDINGS_PATH = Path(__file__).with_name("buildings.json")
 
 
@@ -23,8 +22,7 @@ def _buildings_path() -> Path | None:
     return _BUILDINGS_PATH if _BUILDINGS_PATH.is_file() else None
 
 
-# Trailing words generic enough that the distinctive part alone should also
-# resolve, so "scott hall" additionally yields "scott".
+# Trailing words generic enough that the distinctive part alone should also resolve, so "scott hall" additionally yields "scott".
 _GENERIC_SUFFIX = {
     "hall",
     "house",
@@ -63,11 +61,7 @@ _STOPWORDS = _GENERIC_SUFFIX | {
     "for",
     "s",
 }
-# Curated nicknames and disambiguations, each taking precedence over
-# generated mappings. "hamerschlag" alone denotes the academic hall, not the
-# dorm. "margaret morrison" is listed because both of its words are shared
-# with MMA, so generation drops them and no two-word alias would otherwise
-# exist.
+# Curated nicknames and disambiguations, each taking precedence over generated mappings. "hamerschlag" alone denotes the academic hall, not the dorm. "margaret morrison" is listed because both of its words are shared with MMA, so generation drops them and no two-word alias would otherwise exist.
 _EXTRA_ALIASES: dict[str, str] = {
     "uc": "CUC",
     "university center": "CUC",
@@ -75,8 +69,7 @@ _EXTRA_ALIASES: dict[str, str] = {
     "hamerschlag": "HH",
     "margaret morrison": "MM",
     "maggie mo": "MM",
-    # Well-known interiors that students name directly, each mapping to the
-    # containing building, the closest thing the map can display.
+    # Well-known interiors that students name directly, each mapping to the containing building, the closest thing the map can display.
     "sorrells": "WEH",
 }
 
@@ -124,8 +117,7 @@ def _build_index(
         normalized = normalize(name)
         add(normalized, code)
         if len(code) >= 3:
-            # Two-character codes collide with ordinary words, so only longer
-            # codes register as their own alias.
+            # Two-character codes collide with ordinary words, so only longer codes register as their own alias.
             add(code.lower(), code)
         words = normalized.split()
         stripped = words[:]
@@ -178,8 +170,7 @@ def load_location_index() -> tuple[tuple[tuple[str, str, str], ...], dict[str, s
 _known, LOCATION_ID_TO_LABEL = load_location_index()
 KNOWN_CMU_LOCATIONS: list[tuple[str, str, str]] = list(_known)
 
-# Curated nicknames, exported for the system prompt. The model resolves what
-# users say, so it needs the slang the formal names do not carry.
+# Curated nicknames, exported for the system prompt. The model resolves what users say, so it needs the slang the formal names do not carry.
 CURATED_NICKNAMES: list[tuple[str, str]] = sorted(
     (alias, code) for alias, code in _EXTRA_ALIASES.items()
 )

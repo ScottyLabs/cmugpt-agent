@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 _SERVER_NAME = "cmu"
 
-# Every tool the MCP server publishes is named `<group>_<action>` (for
-# example `maps_get_path`, `eats_get_location_hours`), so a group is disabled
-# by dropping each tool carrying its prefix.
+# Every tool the MCP server publishes is named `<group>_<action>` (for example `maps_get_path`, `eats_get_location_hours`), so a group is disabled by dropping each tool carrying its prefix.
 TOOL_GROUP_LABELS: dict[str, str] = {
     "maps": "CMUMaps",
     "courses": "CMUCourses",
@@ -37,8 +35,7 @@ TOOL_GROUP_LABELS: dict[str, str] = {
     "guide": "CMU Guide",
 }
 
-# Query signals per tool group. When nothing matches, every group remains
-# bound, so a missed keyword cannot deprive the model of a needed tool.
+# Query signals per tool group. When nothing matches, every group remains bound, so a missed keyword cannot deprive the model of a needed tool.
 _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
     "eats": re.compile(
         r"\b("
@@ -75,9 +72,7 @@ _GROUP_HINT_RES: dict[str, re.Pattern[str]] = {
     ),
 }
 
-# Keep the Args block, since parameter conventions live only there. The
-# trailing Returns prose and the markdown boilerplate give the model
-# nothing it needs.
+# Keep the Args block, since parameter conventions live only there. The trailing Returns prose and the markdown boilerplate give the model nothing it needs.
 _RETURNS_PARAGRAPH_RE = re.compile(r"\n\s*Returns[^\n]*(?:\n(?!\s*Args:)[^\n]*)*")
 _MARKDOWN_BOILERPLATE_RE = re.compile(r"\s*formatted as clean markdown", re.IGNORECASE)
 
@@ -178,11 +173,7 @@ def filter_tools(
     return [tool for tool in tools if tool_group(tool.name or "") not in groups]
 
 
-# Tool discovery is a network round trip to the MCP server, so the result
-# is cached. The returned tools are self-contained (each invocation opens
-# its own session), which is what makes reuse safe. Failures are cached
-# briefly too, so an unreachable server is not polled on every request and
-# service still recovers quickly.
+# Tool discovery is a network round trip to the MCP server, so the result is cached. The returned tools are self-contained (each invocation opens its own session), which is what makes reuse safe. Failures are cached briefly too, so an unreachable server is not polled on every request and service still recovers quickly.
 _CACHE_TTL_SECONDS = 60.0
 _FAILURE_TTL_SECONDS = 15.0
 
@@ -192,8 +183,7 @@ _cache_lock = asyncio.Lock()
 
 
 def _server_url() -> str:
-    # Read at call time so that dotenv ordering and runtime environment
-    # changes are respected.
+    # Read at call time so that dotenv ordering and runtime environment changes are respected.
     return get_settings().mcp_server_url
 
 
@@ -230,8 +220,7 @@ async def load_mcp_tools() -> list[BaseTool]:
             return cached[2]
         try:
             tools = await _build_client(url).get_tools()
-            # Condensing here propagates to both the prompt catalog and the
-            # bound schemas, and the cache stores the condensed tools.
+            # Condensing here propagates to both the prompt catalog and the bound schemas, and the cache stores the condensed tools.
             for tool in tools:
                 tool.description = _condense_tool_description(tool.description)
             ttl = _CACHE_TTL_SECONDS

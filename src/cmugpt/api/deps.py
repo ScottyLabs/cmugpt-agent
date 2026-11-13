@@ -8,19 +8,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from cmugpt.settings import get_settings
 
-# Request bodies are rejected by header before parsing. Uvicorn imposes
-# no default body limit, so oversized input is both a cost and an abuse
-# vector.
+# Request bodies are rejected by header before parsing. Uvicorn imposes no default body limit, so oversized input is both a cost and an abuse vector.
 _MAX_BODY_BYTES = 256 * 1024
 
 
-# Shared-secret authentication for the agent and memory routers. Every request
-# to them must carry a bearer token matching AGENT_SHARED_SECRET. Without a
-# secret the routes fail closed, unless AGENT_ALLOW_UNAUTHENTICATED opts in for
-# local development, so a deployment that forgets the secret is unusable rather
-# than open to the internet. auto_error=False stops HTTPBearer from raising its
-# own 403, so a missing header reaches require_shared_secret and gets the
-# standard error envelope.
+# Shared-secret authentication for the agent and memory routers. Every request to them must carry a bearer token matching AGENT_SHARED_SECRET. Without a secret the routes fail closed, unless AGENT_ALLOW_UNAUTHENTICATED opts in for local development, so a deployment that forgets the secret is unusable rather than open to the internet. auto_error=False stops HTTPBearer from raising its own 403, so a missing header reaches require_shared_secret and gets the standard error envelope.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -39,9 +31,7 @@ def require_shared_secret(
     token_ok = (
         creds is not None
         and creds.scheme.lower() == "bearer"
-        # Compared in constant time. An ordinary `!=` stops at the first
-        # wrong character, and that timing difference can reveal the secret
-        # one prefix at a time.
+        # Compared in constant time. An ordinary `!=` stops at the first wrong character, and that timing difference can reveal the secret one prefix at a time.
         and secrets.compare_digest(
             creds.credentials.encode("utf-8"), expected.encode("utf-8")
         )

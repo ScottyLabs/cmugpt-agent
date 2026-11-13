@@ -76,3 +76,5 @@ select = [
   "D209",
   "D400",
 ]
+# ruff format keeps code within the line length. The repo formatter joins wrapped comments onto one line, so E501 would only flag those.
+ignore = ["E501"]
